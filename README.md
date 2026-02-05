@@ -195,9 +195,25 @@ agent-memory unshare mem_abc123 --all
 When an agent starts a session:
 1. **Project memories** - Always loaded (from current project)
 2. **Global memories** - Always loaded (from ~/.agent-memory/global)
-3. **Group-shared memories** - Pinned memories from sibling projects that are shared with groups you belong to
+3. **Group-shared memories** - NOT loaded by default (opt-in via `--groups` flag)
 
-This allows teams to share critical decisions, patterns, and conventions across related projects.
+Group memories are opt-in. Use `--groups` to include them:
+
+```bash
+# Default: project + global only (no groups)
+agent-memory startup --json
+
+# Include specific groups
+agent-memory startup --json --groups=backend-services
+
+# Include all groups
+agent-memory startup --json --groups=all
+
+# Include all groups except one
+agent-memory startup --json --groups=all --exclude-groups=legacy
+```
+
+This allows teams to share critical decisions, patterns, and conventions across related projects while keeping agents focused on the current project by default.
 
 ### Promote/Unpromote
 
@@ -249,7 +265,7 @@ autosave:
 startup:
   auto_load_pinned: true
   ask_load_previous_session: true
-  include_group_shared_pins: true  # Load pinned memories from group siblings
+  include_group_shared_pins: false  # Groups are opt-in via --groups flag
 
 expiration:
   enabled: false

@@ -13,8 +13,9 @@ agent-memory startup --json
 This loads:
 - Pinned memories (critical context for this project)
 - Global pinned memories (cross-project context)
-- Group-shared memories (from sibling projects in workspace groups)
 - Previous session info
+
+**Note:** Group memories are NOT loaded by default. Only include them when the user requests.
 
 ## Auto-Save Triggers
 
@@ -43,6 +44,7 @@ Group operations affect multiple projects and should be under user control:
 - `group create/delete/join/leave` - Only when user requests
 - `share/unshare` - Only when user requests
 - `--share` flag on save - Only when user requests
+- `--groups` flag on startup - Only when user requests
 
 Do not proactively create groups, add projects to groups, or share memories with groups. Memories are private to the current project by default.
 
@@ -50,6 +52,14 @@ Do not proactively create groups, add projects to groups, or share memories with
 # ONLY when user explicitly asks to share across projects:
 agent-memory save --share=mygroup "Shared API pattern for all microservices"
 ```
+
+## Responding to Group Preferences
+
+If the user says:
+- "Use memories from [group]" → `agent-memory startup --json --groups=[group]`
+- "Use all group memories" → `agent-memory startup --json --groups=all`
+- "Use all groups except [group]" → `agent-memory startup --json --groups=all --exclude-groups=[group]`
+- "Don't use group memories" → Default behavior (no flags needed)
 
 ## Session End
 

@@ -1230,24 +1230,49 @@ def init(ctx: click.Context) -> None:
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option(
-    "--include-group-shared/--no-include-group-shared",
-    "include_group_shared",
-    default=None,
-    help="Include pinned memories shared from sibling projects via groups",
+    "--groups",
+    help="Comma-separated list of groups to include, or 'all' for all groups",
+)
+@click.option(
+    "--exclude-groups",
+    help="Comma-separated list of groups to exclude",
 )
 @click.pass_context
-def startup(ctx: click.Context, as_json: bool, include_group_shared: bool | None) -> None:
-    """Get startup context for agent session."""
+def startup(
+    ctx: click.Context,
+    as_json: bool,
+    groups: str | None,
+    exclude_groups: str | None,
+) -> None:
+    """Get startup context for agent session.
+
+    By default, only project and global memories are loaded.
+    Use --groups to opt-in to group-shared memories.
+
+    Examples:
+        agent-memory startup --json
+        agent-memory startup --json --groups=backend-team
+        agent-memory startup --json --groups=all
+        agent-memory startup --json --groups=all --exclude-groups=legacy
+    """
     config: Config = ctx.obj["config"]
     project_path = get_current_project_path()
 
     from agent_memory.relevance import RelevanceEngine
 
+    # Parse comma-separated groups
+    groups_list = [g.strip() for g in groups.split(",")] if groups else None
+    exclude_list = [g.strip() for g in exclude_groups.split(",")] if exclude_groups else None
+
     with get_store(config, project_path) as store:
         vector_store = get_vector_store(config, project_path)
         engine = RelevanceEngine(config, store, vector_store)
 
-        context = engine.get_startup_context(project_path, include_group_shared)
+        context = engine.get_startup_context(
+            project_path,
+            groups=groups_list,
+            exclude_groups=exclude_list,
+        )
 
         if as_json:
             data = {

@@ -76,19 +76,22 @@ class RelevanceEngine:
     def get_startup_context(
         self,
         project_path: Path,
-        include_group_shared: bool | None = None,
+        groups: list[str] | None = None,
+        exclude_groups: list[str] | None = None,
     ) -> StartupContext:
         """Get context to load at session start.
 
         This includes:
         - All pinned memories (always loaded)
-        - Group-shared pinned memories from sibling projects (if enabled)
+        - Group-shared pinned memories from sibling projects (if specified)
         - Previous session info (for user prompt)
 
         Args:
             project_path: The project path
-            include_group_shared: Whether to include group-shared memories.
-                                  Uses config default if not specified.
+            groups: List of group names to include memories from.
+                    Use ["all"] to include all groups.
+                    If None or empty, no group memories are included (opt-in).
+            exclude_groups: List of group names to exclude (applied after groups).
 
         Returns:
             StartupContext with memories to load
@@ -108,16 +111,15 @@ class RelevanceEngine:
             pass
 
         # Get group-shared pinned memories from sibling projects
+        # Groups are opt-in: only load if groups parameter is specified
         group_shared_memories: list[Memory] = []
-        should_include_group_shared = (
-            include_group_shared
-            if include_group_shared is not None
-            else self.config.startup.include_group_shared_pins
-        )
-
-        if should_include_group_shared:
+        if groups:
             try:
-                group_shared_memories = self._get_group_shared_pinned_memories(project_path)
+                group_shared_memories = self._get_group_shared_pinned_memories(
+                    project_path,
+                    groups=groups,
+                    exclude_groups=exclude_groups,
+                )
             except Exception:
                 pass
 
@@ -162,11 +164,18 @@ class RelevanceEngine:
             previous_session_summaries=previous_session_summaries,
         )
 
-    def _get_group_shared_pinned_memories(self, project_path: Path) -> list[Memory]:
+    def _get_group_shared_pinned_memories(
+        self,
+        project_path: Path,
+        groups: list[str] | None = None,
+        exclude_groups: list[str] | None = None,
+    ) -> list[Memory]:
         """Get pinned memories shared with this project via groups.
 
         Args:
             project_path: The current project path
+            groups: List of group names to include. Use ["all"] for all groups.
+            exclude_groups: List of group names to exclude.
 
         Returns:
             List of pinned memories shared from sibling projects
@@ -176,14 +185,38 @@ class RelevanceEngine:
         group_manager = GroupManager(self.config)
 
         # Get groups this project belongs to
-        groups = group_manager.get_groups_for_project(project_path)
-        if not groups:
+        project_groups = group_manager.get_groups_for_project(project_path)
+        if not project_groups:
             return []
 
-        group_names = {g.name for g in groups}
+        # Determine which groups to include
+        all_group_names = {g.name for g in project_groups}
 
-        # Get sibling projects (projects that share groups with us)
-        sibling_projects = group_manager.get_sibling_projects(project_path)
+        if groups and "all" in groups:
+            # Include all groups the project belongs to
+            target_groups = all_group_names.copy()
+        elif groups:
+            # Include only specified groups (that the project actually belongs to)
+            target_groups = {g for g in groups if g in all_group_names}
+        else:
+            # No groups specified - return empty (opt-in behavior)
+            return []
+
+        # Apply exclusions
+        if exclude_groups:
+            target_groups -= set(exclude_groups)
+
+        if not target_groups:
+            return []
+
+        # Get sibling projects (projects that share the target groups with us)
+        sibling_projects: set[Path] = set()
+        for group in project_groups:
+            if group.name in target_groups:
+                for proj in group.projects:
+                    if proj != project_path.resolve():
+                        sibling_projects.add(proj)
+
         if not sibling_projects:
             return []
 
@@ -199,8 +232,10 @@ class RelevanceEngine:
                 pinned = sibling_store.list_pinned("project")
 
                 for memory in pinned:
-                    # Only include if shared with a group we're in
-                    if memory.shared_groups and any(g in group_names for g in memory.shared_groups):
+                    # Only include if shared with a group we're targeting
+                    if memory.shared_groups and any(
+                        g in target_groups for g in memory.shared_groups
+                    ):
                         if memory.id not in seen_ids:
                             shared_memories.append(memory)
                             seen_ids.add(memory.id)

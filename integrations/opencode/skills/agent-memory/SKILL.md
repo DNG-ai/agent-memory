@@ -218,18 +218,27 @@ agent-memory export --all-projects
 
 At the beginning of each session:
 
-1. **Pinned memories are automatically loaded** - These contain critical context
-2. **Group-shared memories are loaded** - Pinned memories from sibling projects
+1. **Pinned memories are automatically loaded** - Project and global pinned memories
+2. **Group-shared memories are NOT loaded by default** - Use `--groups` to opt-in
 3. **Ask the user about previous session** - "Would you like me to load the previous session context?"
 
 Use this command to get startup context:
 
 ```bash
+# Default: project + global memories only (no groups)
 agent-memory startup --json
 
-# Explicitly include/exclude group-shared memories
-agent-memory startup --json --include-group-shared
-agent-memory startup --json --no-include-group-shared
+# Include specific groups
+agent-memory startup --json --groups=backend-team
+
+# Include multiple specific groups
+agent-memory startup --json --groups=backend-team,shared-libs
+
+# Include all groups
+agent-memory startup --json --groups=all
+
+# Include all groups except one
+agent-memory startup --json --groups=all --exclude-groups=legacy-team
 ```
 
 ## Memory Categories

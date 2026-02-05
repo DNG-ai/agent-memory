@@ -35,7 +35,7 @@ DEFAULT_CONFIG = {
     "startup": {
         "auto_load_pinned": True,
         "ask_load_previous_session": True,
-        "include_group_shared_pins": True,
+        "include_group_shared_pins": False,  # Groups are opt-in via --groups flag
     },
     "expiration": {
         "enabled": False,
@@ -85,7 +85,7 @@ class StartupConfig:
 
     auto_load_pinned: bool = True
     ask_load_previous_session: bool = True
-    include_group_shared_pins: bool = True  # Include pinned memories from group-shared projects
+    include_group_shared_pins: bool = False  # Groups are opt-in via --groups flag
 
 
 @dataclass
