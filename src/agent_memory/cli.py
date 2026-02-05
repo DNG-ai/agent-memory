@@ -97,35 +97,45 @@ def display_cross_project_memories(
     results: list[tuple[Path | None, list[Memory]]],
     title: str = "Memories (All Projects)",
 ) -> None:
-    """Display memories from multiple projects in a table."""
+    """Display memories from multiple projects, grouped by project."""
     total_count = sum(len(memories) for _, memories in results)
     if total_count == 0:
         console.print("[dim]No memories found.[/dim]")
         return
 
-    table = Table(title=f"{title} ({total_count} total)")
-    table.add_column("ID", style="cyan", no_wrap=True)
-    table.add_column("Pin", style="red", width=3)
-    table.add_column("Category", style="green")
-    table.add_column("Content", style="white")
-    table.add_column("Project", style="blue")
+    console.print(f"\n[bold]{title}[/bold] ({total_count} total)\n")
 
     for project_path, memories in results:
-        project_label = "GLOBAL" if project_path is None else str(project_path)
-        # Shorten long paths
-        if project_path and len(project_label) > 40:
-            project_label = "..." + project_label[-37:]
+        if not memories:
+            continue
+
+        # Project header with full path
+        project_label = (
+            "[yellow]GLOBAL[/yellow]" if project_path is None else f"[blue]{project_path}[/blue]"
+        )
+        console.print(f"{'─' * 60}")
+        console.print(project_label)
+        console.print(f"{'─' * 60}")
+
+        # Table for this project's memories
+        table = Table(show_header=True, header_style="bold", box=None)
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Pin", style="red", width=3)
+        table.add_column("Category", style="green")
+        table.add_column("Content", style="white")
+        table.add_column("Created", style="dim")
 
         for memory in memories:
             table.add_row(
                 memory.id,
                 "*" if memory.pinned else "",
                 memory.category,
-                truncate_text(memory.content, 45),
-                project_label,
+                truncate_text(memory.content, 50),
+                memory.created_at.strftime("%Y-%m-%d"),
             )
 
-    console.print(table)
+        console.print(table)
+        console.print("")  # Blank line between projects
 
 
 @click.group()
@@ -153,22 +163,23 @@ def projects(ctx: click.Context) -> None:
             console.print("[dim]No projects with memories found.[/dim]")
             return
 
-        table = Table(title="Tracked Projects")
-        table.add_column("Project", style="blue")
-        table.add_column("Memories", style="cyan", justify="right")
-        table.add_column("Last Updated", style="dim")
+        console.print("\n[bold]Tracked Projects[/bold]\n")
 
         for stat in stats:
             last_updated = (
                 stat["last_updated"].strftime("%Y-%m-%d %H:%M") if stat["last_updated"] else "Never"
             )
-            table.add_row(
-                str(stat["project_path"]),
-                str(stat["memory_count"]),
-                last_updated,
-            )
+            memory_count = stat["memory_count"]
+            project_path = stat["project_path"]
 
-        console.print(table)
+            # Color based on memory count
+            count_style = "green" if memory_count > 0 else "dim"
+
+            console.print(f"[blue]{project_path}[/blue]")
+            console.print(
+                f"  [{count_style}]{memory_count} memories[/{count_style}] | Last updated: {last_updated}"
+            )
+            console.print("")
 
 
 # ─────────────────────────────────────────────────────────────
