@@ -27,10 +27,10 @@ class Memory:
     id: str
     content: str
     category: str
-    scope: str  # "project" or "global"
+    scope: str  # "project", "group", or "global"
     project_path: str | None
     pinned: bool
-    shared_groups: list[str]  # List of group names this memory is shared with
+    groups: list[str]  # Owner groups (only used when scope="group")
     created_at: datetime
     updated_at: datetime
     expires_at: datetime | None
@@ -46,7 +46,7 @@ class Memory:
             "scope": self.scope,
             "project_path": self.project_path,
             "pinned": self.pinned,
-            "shared_groups": self.shared_groups,
+            "groups": self.groups,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
@@ -57,11 +57,11 @@ class Memory:
     @classmethod
     def from_row(cls, row: tuple[Any, ...]) -> Memory:
         """Create Memory from database row."""
-        # Handle both old schema (11 columns) and new schema (12 columns)
+        # Handle schema with groups column (index 11)
         if len(row) >= 12:
-            shared_groups = deserialize_metadata(row[11]) if row[11] else []
+            groups = deserialize_metadata(row[11]) if row[11] else []
         else:
-            shared_groups = []
+            groups = []
 
         return cls(
             id=row[0],
@@ -70,7 +70,7 @@ class Memory:
             scope=row[3],
             project_path=row[4],
             pinned=bool(row[5]),
-            shared_groups=shared_groups if isinstance(shared_groups, list) else [],
+            groups=groups if isinstance(groups, list) else [],
             created_at=parse_timestamp(row[6]),
             updated_at=parse_timestamp(row[7]),
             expires_at=parse_timestamp(row[8]) if row[8] else None,
@@ -124,8 +124,11 @@ class MemoryStore:
         return self._project_conn
 
     def _get_conn(self, scope: str) -> sqlite3.Connection:
-        """Get connection for scope."""
-        if scope == "global":
+        """Get connection for scope.
+
+        Note: 'group' scope uses the global database.
+        """
+        if scope in ("global", "group"):
             return self._get_global_conn()
         return self._get_project_conn()
 
@@ -144,7 +147,7 @@ class MemoryStore:
                 expires_at TEXT,
                 source TEXT NOT NULL,
                 metadata TEXT DEFAULT '{}',
-                shared_groups TEXT DEFAULT '[]'
+                groups TEXT DEFAULT '[]'
             )
         """)
         conn.execute("""
@@ -156,15 +159,40 @@ class MemoryStore:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)
+        """)
 
-        # Migration: Add shared_groups column if it doesn't exist
-        try:
-            conn.execute("ALTER TABLE memories ADD COLUMN shared_groups TEXT DEFAULT '[]'")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # Migration: Rename shared_groups to groups and migrate data
+        self._migrate_groups_column(conn)
 
         conn.commit()
+
+    def _migrate_groups_column(self, conn: sqlite3.Connection) -> None:
+        """Migrate from shared_groups to groups column and update scopes."""
+        # Check if old shared_groups column exists
+        cursor = conn.execute("PRAGMA table_info(memories)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "shared_groups" in columns and "groups" not in columns:
+            # Add new groups column
+            conn.execute("ALTER TABLE memories ADD COLUMN groups TEXT DEFAULT '[]'")
+            # Copy data from shared_groups to groups
+            conn.execute("UPDATE memories SET groups = shared_groups")
+            # Update scope to 'group' for memories with non-empty groups
+            conn.execute("""
+                UPDATE memories 
+                SET scope = 'group' 
+                WHERE groups != '[]' AND groups IS NOT NULL AND groups != ''
+            """)
+            conn.commit()
+        elif "groups" not in columns:
+            # Fresh install - just add groups column
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN groups TEXT DEFAULT '[]'")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def save(
         self,
@@ -175,19 +203,19 @@ class MemoryStore:
         source: str = "user_explicit",
         metadata: dict[str, Any] | None = None,
         expires_at: datetime | None = None,
-        shared_groups: list[str] | None = None,
+        groups: list[str] | None = None,
     ) -> Memory:
         """Save a new memory.
 
         Args:
             content: The memory content
             category: Memory category (auto-detected if not provided)
-            scope: "project" or "global"
+            scope: "project", "group", or "global"
             pinned: Whether to pin the memory
             source: Source of the memory
             metadata: Additional metadata
             expires_at: Optional expiration datetime
-            shared_groups: List of group names to share this memory with
+            groups: Owner groups (required for scope="group", ignored otherwise)
 
         Returns:
             The created Memory object
@@ -195,16 +223,26 @@ class MemoryStore:
         memory_id = generate_memory_id()
         now = get_timestamp()
         category = normalize_category(category, content)
-        shared_groups = shared_groups or []
+        groups = groups or []
+
+        # Validate scope
+        if scope not in ("project", "group", "global"):
+            raise ValueError(f"Invalid scope: {scope}. Must be 'project', 'group', or 'global'")
+
+        # Group scope requires groups
+        if scope == "group" and not groups:
+            raise ValueError("Group scope requires at least one group")
 
         project_path_str = str(self.project_path) if self.project_path else None
 
-        conn = self._get_conn(scope)
+        # Group and global scopes use global DB
+        db_scope = "global" if scope in ("group", "global") else "project"
+        conn = self._get_conn(db_scope)
         conn.execute(
             """
             INSERT INTO memories 
             (id, content, category, scope, project_path, pinned, 
-             created_at, updated_at, expires_at, source, metadata, shared_groups)
+             created_at, updated_at, expires_at, source, metadata, groups)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -219,7 +257,7 @@ class MemoryStore:
                 expires_at.isoformat() if expires_at else None,
                 source,
                 serialize_metadata(metadata),
-                serialize_metadata(shared_groups),
+                serialize_metadata(groups),
             ),
         )
         conn.commit()
@@ -231,7 +269,7 @@ class MemoryStore:
             scope=scope,
             project_path=project_path_str,
             pinned=pinned,
-            shared_groups=shared_groups,
+            groups=groups,
             created_at=now,
             updated_at=now,
             expires_at=expires_at,
@@ -274,6 +312,11 @@ class MemoryStore:
 
         query = "SELECT * FROM memories WHERE 1=1"
         params: list[Any] = []
+
+        # Filter by scope when using global DB (contains both 'group' and 'global' scopes)
+        if scope in ("group", "global"):
+            query += " AND scope = ?"
+            params.append(scope)
 
         if category:
             query += " AND category = ?"
@@ -371,93 +414,191 @@ class MemoryStore:
         """Unpin a memory."""
         return self.update(memory_id, scope, pinned=False)
 
-    def share(
+    def add_groups(
         self,
         memory_id: str,
         group_names: list[str],
-        scope: str = "project",
     ) -> Memory | None:
-        """Share a memory with one or more groups.
+        """Add owner groups to a group-scoped memory.
 
         Args:
-            memory_id: ID of the memory to share
-            group_names: List of group names to share with
-            scope: "project" or "global"
+            memory_id: ID of the memory
+            group_names: List of group names to add
 
         Returns:
             Updated memory or None if not found
         """
-        memory = self.get(memory_id, scope)
+        memory = self.get_by_id(memory_id)
         if memory is None:
             return None
 
-        # Merge with existing shared groups
-        current_groups = set(memory.shared_groups)
+        if memory.scope != "group":
+            raise ValueError("Can only add groups to group-scoped memories")
+
+        # Merge with existing groups
+        current_groups = set(memory.groups)
         current_groups.update(group_names)
         new_groups = sorted(current_groups)
 
-        conn = self._get_conn(scope)
+        conn = self._get_conn("global")  # Group scope uses global DB
         now = get_timestamp()
 
         conn.execute(
-            "UPDATE memories SET shared_groups = ?, updated_at = ? WHERE id = ?",
+            "UPDATE memories SET groups = ?, updated_at = ? WHERE id = ?",
             (serialize_metadata(new_groups), now.isoformat(), memory_id),
         )
         conn.commit()
 
-        return self.get(memory_id, scope)
+        return self.get_by_id(memory_id)
 
-    def unshare(
+    def remove_groups(
         self,
         memory_id: str,
-        group_names: list[str] | None = None,
-        scope: str = "project",
+        group_names: list[str],
     ) -> Memory | None:
-        """Remove a memory from one or more groups.
+        """Remove owner groups from a group-scoped memory.
 
         Args:
-            memory_id: ID of the memory to unshare
-            group_names: List of group names to remove from (None = remove from all)
-            scope: "project" or "global"
+            memory_id: ID of the memory
+            group_names: List of group names to remove
 
         Returns:
             Updated memory or None if not found
         """
-        memory = self.get(memory_id, scope)
+        memory = self.get_by_id(memory_id)
         if memory is None:
             return None
 
-        if group_names is None:
-            # Remove from all groups
-            new_groups: list[str] = []
-        else:
-            # Remove only specified groups
-            new_groups = [g for g in memory.shared_groups if g not in group_names]
+        if memory.scope != "group":
+            raise ValueError("Can only remove groups from group-scoped memories")
 
-        conn = self._get_conn(scope)
+        new_groups = [g for g in memory.groups if g not in group_names]
+
+        if not new_groups:
+            raise ValueError(
+                "Cannot remove all groups from a group-scoped memory. Use set_scope to change to global."
+            )
+
+        conn = self._get_conn("global")
         now = get_timestamp()
 
         conn.execute(
-            "UPDATE memories SET shared_groups = ?, updated_at = ? WHERE id = ?",
+            "UPDATE memories SET groups = ?, updated_at = ? WHERE id = ?",
             (serialize_metadata(new_groups), now.isoformat(), memory_id),
         )
         conn.commit()
 
-        return self.get(memory_id, scope)
+        return self.get_by_id(memory_id)
 
-    def promote_to_global(
+    def set_groups(
+        self,
+        memory_id: str,
+        group_names: list[str],
+    ) -> Memory | None:
+        """Set owner groups for a group-scoped memory (replaces all).
+
+        Args:
+            memory_id: ID of the memory
+            group_names: List of group names (replaces existing)
+
+        Returns:
+            Updated memory or None if not found
+        """
+        memory = self.get_by_id(memory_id)
+        if memory is None:
+            return None
+
+        if memory.scope != "group":
+            raise ValueError("Can only set groups on group-scoped memories")
+
+        if not group_names:
+            raise ValueError(
+                "Cannot set empty groups on group-scoped memory. Use set_scope to change to global."
+            )
+
+        conn = self._get_conn("global")
+        now = get_timestamp()
+
+        conn.execute(
+            "UPDATE memories SET groups = ?, updated_at = ? WHERE id = ?",
+            (serialize_metadata(sorted(group_names)), now.isoformat(), memory_id),
+        )
+        conn.commit()
+
+        return self.get_by_id(memory_id)
+
+    def set_scope(
+        self,
+        memory_id: str,
+        new_scope: str,
+        groups: list[str] | None = None,
+    ) -> Memory | None:
+        """Change the scope of a memory.
+
+        Args:
+            memory_id: ID of the memory
+            new_scope: New scope ("project", "group", or "global")
+            groups: Required if new_scope is "group"
+
+        Returns:
+            Updated memory or None if not found
+        """
+        memory = self.get_by_id(memory_id)
+        if memory is None:
+            return None
+
+        if new_scope not in ("project", "group", "global"):
+            raise ValueError(f"Invalid scope: {new_scope}")
+
+        if new_scope == "group" and not groups:
+            raise ValueError("Group scope requires at least one group")
+
+        # Determine source and target databases
+        old_db = "global" if memory.scope in ("group", "global") else "project"
+        new_db = "global" if new_scope in ("group", "global") else "project"
+
+        if old_db == new_db:
+            # Same database - just update scope and groups
+            conn = self._get_conn(old_db)
+            now = get_timestamp()
+            new_groups = groups if new_scope == "group" else []
+            conn.execute(
+                "UPDATE memories SET scope = ?, groups = ?, updated_at = ? WHERE id = ?",
+                (new_scope, serialize_metadata(new_groups), now.isoformat(), memory_id),
+            )
+            conn.commit()
+            return self.get_by_id(memory_id)
+        else:
+            # Different databases - need to move the memory
+            # Delete from old location
+            self.delete(memory_id, old_db)
+            # Save to new location
+            return self.save(
+                content=memory.content,
+                category=memory.category,
+                scope=new_scope,
+                pinned=memory.pinned,
+                source=memory.source,
+                metadata=memory.metadata,
+                groups=groups if new_scope == "group" else None,
+            )
+
+    def promote(
         self,
         memory_id: str,
         from_project: Path | None = None,
+        to_group: list[str] | None = None,
     ) -> Memory | None:
-        """Move a memory from project scope to global scope.
+        """Move a memory from project scope to global or group scope.
 
         Args:
             memory_id: ID of the memory to promote
             from_project: Project path (uses current project if None)
+            to_group: If specified, promote to group scope with these owner groups.
+                      If None, promote to global scope (true global).
 
         Returns:
-            The new global memory or None if not found
+            The new memory or None if not found
         """
         # Use specified project or current project
         if from_project is not None:
@@ -470,45 +611,51 @@ class MemoryStore:
         if memory is None:
             return None
 
-        # Save to global
-        global_memory = self.save(
+        # Determine target scope
+        target_scope = "group" if to_group else "global"
+
+        # Save to new scope
+        new_memory = self.save(
             content=memory.content,
             category=memory.category,
-            scope="global",
+            scope=target_scope,
             pinned=memory.pinned,
             source=memory.source,
             metadata=memory.metadata,
-            shared_groups=memory.shared_groups,
+            groups=to_group,
         )
 
         # Delete from project
         source_store.delete(memory_id, "project")
 
-        return global_memory
+        return new_memory
 
-    def unpromote_to_project(
+    def unpromote(
         self,
         memory_id: str,
         to_project: Path,
     ) -> Memory | None:
-        """Move a memory from global scope to a specific project.
+        """Move a memory from global or group scope to a specific project.
 
         Args:
-            memory_id: ID of the global memory to unpromote
+            memory_id: ID of the memory to unpromote
             to_project: Target project path
 
         Returns:
             The new project memory or None if not found
         """
-        # Get memory from global
+        # Get memory from global DB (could be 'global' or 'group' scope)
         memory = self.get(memory_id, "global")
         if memory is None:
             return None
 
+        if memory.scope not in ("global", "group"):
+            raise ValueError("Can only unpromote global or group-scoped memories")
+
         # Create store for target project
         target_store = MemoryStore(self.config, to_project)
 
-        # Save to project
+        # Save to project (groups are not preserved - project scope doesn't use groups)
         project_memory = target_store.save(
             content=memory.content,
             category=memory.category,
@@ -516,10 +663,9 @@ class MemoryStore:
             pinned=memory.pinned,
             source=memory.source,
             metadata=memory.metadata,
-            shared_groups=memory.shared_groups,
         )
 
-        # Delete from global
+        # Delete from global DB
         self.delete(memory_id, "global")
 
         return project_memory

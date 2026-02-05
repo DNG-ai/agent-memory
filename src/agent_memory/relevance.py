@@ -20,7 +20,7 @@ class StartupContext:
     """Context loaded at session start."""
 
     pinned_memories: list[Memory]
-    group_shared_memories: list[Memory]  # Pinned memories shared from sibling projects
+    group_memories: list[Memory]  # Pinned group-scoped memories (visible via --groups)
     has_previous_session: bool
     previous_session_id: str | None
     previous_session_summaries: list[Memory]
@@ -29,7 +29,7 @@ class StartupContext:
         """Convert to dictionary for display."""
         return {
             "pinned_count": len(self.pinned_memories),
-            "group_shared_count": len(self.group_shared_memories),
+            "group_memory_count": len(self.group_memories),
             "has_previous_session": self.has_previous_session,
             "previous_session_id": self.previous_session_id,
             "summary_count": len(self.previous_session_summaries),
@@ -110,13 +110,12 @@ class RelevanceEngine:
         except Exception:
             pass
 
-        # Get group-shared pinned memories from sibling projects
+        # Get pinned group-scoped memories
         # Groups are opt-in: only load if groups parameter is specified
-        group_shared_memories: list[Memory] = []
+        group_memories: list[Memory] = []
         if groups:
             try:
-                group_shared_memories = self._get_group_shared_pinned_memories(
-                    project_path,
+                group_memories = self._get_group_pinned_memories(
                     groups=groups,
                     exclude_groups=exclude_groups,
                 )
@@ -158,93 +157,63 @@ class RelevanceEngine:
 
         return StartupContext(
             pinned_memories=pinned_memories,
-            group_shared_memories=group_shared_memories,
+            group_memories=group_memories,
             has_previous_session=has_previous_session,
             previous_session_id=previous_session_id,
             previous_session_summaries=previous_session_summaries,
         )
 
-    def _get_group_shared_pinned_memories(
+    def _get_group_pinned_memories(
         self,
-        project_path: Path,
         groups: list[str] | None = None,
         exclude_groups: list[str] | None = None,
     ) -> list[Memory]:
-        """Get pinned memories shared with this project via groups.
+        """Get pinned group-scoped memories.
+
+        Group-scoped memories are stored in the global DB with scope="group"
+        and have owner groups in the `groups` field. They are only visible
+        when the user specifies matching groups via --groups flag.
 
         Args:
-            project_path: The current project path
             groups: List of group names to include. Use ["all"] for all groups.
             exclude_groups: List of group names to exclude.
 
         Returns:
-            List of pinned memories shared from sibling projects
+            List of pinned group-scoped memories
         """
-        from agent_memory.groups import GroupManager
-
-        group_manager = GroupManager(self.config)
-
-        # Get groups this project belongs to
-        project_groups = group_manager.get_groups_for_project(project_path)
-        if not project_groups:
+        if not groups:
             return []
 
-        # Determine which groups to include
-        all_group_names = {g.name for g in project_groups}
+        # Get all pinned group-scoped memories from global DB
+        all_group_memories = self.store.list_pinned("group")
 
-        if groups and "all" in groups:
-            # Include all groups the project belongs to
-            target_groups = all_group_names.copy()
-        elif groups:
-            # Include only specified groups (that the project actually belongs to)
-            target_groups = {g for g in groups if g in all_group_names}
-        else:
-            # No groups specified - return empty (opt-in behavior)
+        if not all_group_memories:
             return []
+
+        # Determine if we should include all groups
+        include_all = "all" in groups
 
         # Apply exclusions
-        if exclude_groups:
-            target_groups -= set(exclude_groups)
+        excluded = set(exclude_groups) if exclude_groups else set()
 
-        if not target_groups:
-            return []
-
-        # Get sibling projects (projects that share the target groups with us)
-        sibling_projects: set[Path] = set()
-        for group in project_groups:
-            if group.name in target_groups:
-                for proj in group.projects:
-                    if proj != project_path.resolve():
-                        sibling_projects.add(proj)
-
-        if not sibling_projects:
-            return []
-
-        shared_memories: list[Memory] = []
-        seen_ids: set[str] = set()
-
-        for sibling_path in sibling_projects:
-            try:
-                # Create a store for the sibling project
-                sibling_store = MemoryStore(self.config, sibling_path)
-
-                # Get pinned memories from sibling
-                pinned = sibling_store.list_pinned("project")
-
-                for memory in pinned:
-                    # Only include if shared with a group we're targeting
-                    if memory.shared_groups and any(
-                        g in target_groups for g in memory.shared_groups
-                    ):
-                        if memory.id not in seen_ids:
-                            shared_memories.append(memory)
-                            seen_ids.add(memory.id)
-
-                sibling_store.close()
-            except Exception:
+        # Filter memories by their owner groups
+        filtered_memories: list[Memory] = []
+        for memory in all_group_memories:
+            if not memory.groups:
                 continue
 
-        return shared_memories
+            # Check if any of the memory's owner groups match requested groups
+            if include_all:
+                # Include if any owner group is not excluded
+                if any(g not in excluded for g in memory.groups):
+                    filtered_memories.append(memory)
+            else:
+                # Include if any owner group is in the requested groups and not excluded
+                requested = set(groups)
+                if any(g in requested and g not in excluded for g in memory.groups):
+                    filtered_memories.append(memory)
+
+        return filtered_memories
 
     def get_relevant_memories(
         self,

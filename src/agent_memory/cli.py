@@ -187,32 +187,50 @@ def projects(ctx: click.Context) -> None:
 # ─────────────────────────────────────────────────────────────
 @main.command()
 @click.argument("content")
-@click.option("--global", "is_global", is_flag=True, help="Save to global scope")
+@click.option("--global", "is_global", is_flag=True, help="Save to global scope (true global)")
+@click.option(
+    "--group", "group_names", help="Save to group scope with comma-separated owner groups"
+)
 @click.option("--pin", is_flag=True, help="Pin this memory")
 @click.option(
     "--category",
     type=click.Choice(["factual", "decision", "task_history", "session_summary"]),
     help="Memory category (auto-detected if not specified)",
 )
-@click.option(
-    "--share",
-    "share_groups",
-    multiple=True,
-    help="Share with group(s). Can be specified multiple times.",
-)
 @click.pass_context
 def save(
     ctx: click.Context,
     content: str,
     is_global: bool,
+    group_names: str | None,
     pin: bool,
     category: str | None,
-    share_groups: tuple[str, ...],
 ) -> None:
-    """Save a new memory."""
+    """Save a new memory.
+
+    Scopes:
+        (default)  Project scope - private to current project
+        --group=X  Group scope - visible only with --groups=X on startup
+        --global   Global scope - visible to all projects always
+    """
     config: Config = ctx.obj["config"]
-    scope = "global" if is_global else "project"
-    project_path = None if is_global else get_current_project_path()
+
+    # Determine scope
+    if is_global and group_names:
+        console.print("[red]Cannot use both --global and --group[/red]")
+        sys.exit(1)
+
+    if group_names:
+        scope = "group"
+        groups = [g.strip() for g in group_names.split(",")]
+    elif is_global:
+        scope = "global"
+        groups = None
+    else:
+        scope = "project"
+        groups = None
+
+    project_path = get_current_project_path()
 
     with get_store(config, project_path) as store:
         memory = store.save(
@@ -221,7 +239,7 @@ def save(
             scope=scope,
             pinned=pin,
             source="user_explicit",
-            shared_groups=list(share_groups) if share_groups else None,
+            groups=groups,
         )
 
         # Add to vector store
@@ -238,12 +256,13 @@ def save(
                 console.print(f"[yellow]Warning: Could not add to vector store: {e}[/yellow]")
 
     console.print(f"[green]Saved memory:[/green] {memory.id}")
+    console.print(f"  Scope: {scope}")
     console.print(f"  Category: {get_category_display_name(memory.category)}")
     console.print(f"  Content: {truncate_text(content, 80)}")
     if pin:
         console.print("  [red]Pinned[/red]")
-    if share_groups:
-        console.print(f"  [blue]Shared with: {', '.join(share_groups)}[/blue]")
+    if groups:
+        console.print(f"  [blue]Groups: {', '.join(groups)}[/blue]")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -365,9 +384,12 @@ def search(
     is_flag=True,
     help="List from all projects (user visibility, not for agents)",
 )
-@click.option("--shared", is_flag=True, help="Show only memories shared with any group")
+@click.option("--group-owned", is_flag=True, help="Show only group-scoped memories")
+@click.option("--owned-by", "owned_by_group", help="Show memories owned by a specific group")
 @click.option(
-    "--shared-with", "shared_with_group", help="Show memories shared with a specific group"
+    "--include-group-owned",
+    is_flag=True,
+    help="With --global, also include group-scoped memories",
 )
 @click.pass_context
 def list_memories(
@@ -377,8 +399,9 @@ def list_memories(
     category: str | None,
     limit: int,
     all_projects: bool,
-    shared: bool,
-    shared_with_group: str | None,
+    group_owned: bool,
+    owned_by_group: str | None,
+    include_group_owned: bool,
 ) -> None:
     """List memories."""
     config: Config = ctx.obj["config"]
@@ -393,14 +416,14 @@ def list_memories(
                 include_global=True,
             )
 
-            # Filter by shared status if requested
-            if shared or shared_with_group:
+            # Filter by group ownership if requested
+            if group_owned or owned_by_group:
                 filtered_results = []
                 for project_path, memories in results:
-                    if shared_with_group:
-                        filtered = [m for m in memories if shared_with_group in m.shared_groups]
+                    if owned_by_group:
+                        filtered = [m for m in memories if owned_by_group in m.groups]
                     else:
-                        filtered = [m for m in memories if m.shared_groups]
+                        filtered = [m for m in memories if m.scope == "group"]
                     if filtered:
                         filtered_results.append((project_path, filtered))
                 results = filtered_results
@@ -408,10 +431,10 @@ def list_memories(
             title = "Memories (All Projects)"
             if pinned:
                 title += " - Pinned"
-            if shared:
-                title += " - Shared"
-            if shared_with_group:
-                title += f" - Shared with '{shared_with_group}'"
+            if group_owned:
+                title += " - Group-scoped"
+            if owned_by_group:
+                title += f" - Owned by '{owned_by_group}'"
             if category:
                 title += f" [{category}]"
 
@@ -419,30 +442,49 @@ def list_memories(
         return
 
     # Standard mode
-    scope = "global" if is_global else "project"
     project_path = None if is_global else get_current_project_path()
 
     with get_store(config, project_path) as store:
-        memories = store.list(
-            scope=scope,
-            category=category,
-            pinned_only=pinned,
-            limit=limit,
-        )
+        if is_global:
+            # Get global scope memories
+            memories = store.list(
+                scope="global",
+                category=category,
+                pinned_only=pinned,
+                limit=limit,
+            )
+            # Optionally include group-scoped memories
+            if include_group_owned:
+                group_memories = store.list(
+                    scope="group",
+                    category=category,
+                    pinned_only=pinned,
+                    limit=limit,
+                )
+                memories.extend(group_memories)
+        else:
+            memories = store.list(
+                scope="project",
+                category=category,
+                pinned_only=pinned,
+                limit=limit,
+            )
 
-        # Filter by shared status if requested
-        if shared:
-            memories = [m for m in memories if m.shared_groups]
-        if shared_with_group:
-            memories = [m for m in memories if shared_with_group in m.shared_groups]
+        # Filter by group ownership if requested
+        if group_owned:
+            memories = [m for m in memories if m.scope == "group"]
+        if owned_by_group:
+            memories = [m for m in memories if owned_by_group in m.groups]
 
         title = f"{'Global' if is_global else 'Project'} Memories"
+        if is_global and include_group_owned:
+            title = "Global + Group Memories"
         if pinned:
             title += " (Pinned)"
-        if shared:
-            title += " (Shared)"
-        if shared_with_group:
-            title += f" (Shared with '{shared_with_group}')"
+        if group_owned:
+            title += " (Group-scoped)"
+        if owned_by_group:
+            title += f" (Owned by '{owned_by_group}')"
         if category:
             title += f" [{category}]"
 
@@ -905,67 +947,118 @@ def group_show(ctx: click.Context, name: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# SHARE/UNSHARE COMMANDS
+# GROUP MANAGEMENT COMMANDS (for group-scoped memories)
 # ─────────────────────────────────────────────────────────────
-@main.command()
+@main.command("add-groups")
 @click.argument("memory_id")
 @click.argument("groups", nargs=-1, required=True)
 @click.pass_context
-def share(ctx: click.Context, memory_id: str, groups: tuple[str, ...]) -> None:
-    """Share a memory with one or more groups."""
+def add_groups(ctx: click.Context, memory_id: str, groups: tuple[str, ...]) -> None:
+    """Add owner groups to a group-scoped memory."""
     config: Config = ctx.obj["config"]
     project_path = get_current_project_path()
 
     with get_store(config, project_path) as store:
-        # Try project first, then global
-        memory = store.share(memory_id, list(groups), "project")
-        if memory is None:
-            memory = store.share(memory_id, list(groups), "global")
+        try:
+            memory = store.add_groups(memory_id, list(groups))
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
 
         if memory is None:
             console.print(f"[red]Memory not found: {memory_id}[/red]")
             sys.exit(1)
 
-        console.print(f"[green]Shared {memory_id} with: {', '.join(groups)}[/green]")
-        console.print(f"  Now shared with: {', '.join(memory.shared_groups) or 'none'}")
+        console.print(f"[green]Added groups to {memory_id}: {', '.join(groups)}[/green]")
+        console.print(f"  Owner groups: {', '.join(memory.groups)}")
 
 
-@main.command()
+@main.command("remove-groups")
 @click.argument("memory_id")
-@click.argument("groups", nargs=-1)
-@click.option("--all", "unshare_all", is_flag=True, help="Remove from all groups")
+@click.argument("groups", nargs=-1, required=True)
 @click.pass_context
-def unshare(
-    ctx: click.Context,
-    memory_id: str,
-    groups: tuple[str, ...],
-    unshare_all: bool,
-) -> None:
-    """Remove a memory from groups."""
+def remove_groups(ctx: click.Context, memory_id: str, groups: tuple[str, ...]) -> None:
+    """Remove owner groups from a group-scoped memory."""
     config: Config = ctx.obj["config"]
     project_path = get_current_project_path()
 
-    if not groups and not unshare_all:
-        console.print("[red]Specify group names or --all[/red]")
+    with get_store(config, project_path) as store:
+        try:
+            memory = store.remove_groups(memory_id, list(groups))
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+
+        if memory is None:
+            console.print(f"[red]Memory not found: {memory_id}[/red]")
+            sys.exit(1)
+
+        console.print(f"[green]Removed groups from {memory_id}: {', '.join(groups)}[/green]")
+        console.print(f"  Owner groups: {', '.join(memory.groups) or 'none'}")
+
+
+@main.command("set-groups")
+@click.argument("memory_id")
+@click.argument("groups", nargs=-1, required=True)
+@click.pass_context
+def set_groups_cmd(ctx: click.Context, memory_id: str, groups: tuple[str, ...]) -> None:
+    """Set owner groups for a group-scoped memory (replaces all)."""
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    with get_store(config, project_path) as store:
+        try:
+            memory = store.set_groups(memory_id, list(groups))
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+
+        if memory is None:
+            console.print(f"[red]Memory not found: {memory_id}[/red]")
+            sys.exit(1)
+
+        console.print(f"[green]Set groups for {memory_id}: {', '.join(groups)}[/green]")
+        console.print(f"  Owner groups: {', '.join(memory.groups)}")
+
+
+@main.command("set-scope")
+@click.argument("memory_id")
+@click.argument("scope", type=click.Choice(["project", "group", "global"]))
+@click.option("--group", "group_names", multiple=True, help="Groups (required for group scope)")
+@click.option(
+    "--to-project", type=click.Path(exists=True), help="Target project (for project scope)"
+)
+@click.pass_context
+def set_scope_cmd(
+    ctx: click.Context,
+    memory_id: str,
+    scope: str,
+    group_names: tuple[str, ...],
+    to_project: str | None,
+) -> None:
+    """Change the scope of a memory."""
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    if scope == "group" and not group_names:
+        console.print("[red]Group scope requires --group=<name>[/red]")
         sys.exit(1)
 
     with get_store(config, project_path) as store:
-        group_list = None if unshare_all else list(groups)
-
-        # Try project first, then global
-        memory = store.unshare(memory_id, group_list, "project")
-        if memory is None:
-            memory = store.unshare(memory_id, group_list, "global")
+        try:
+            groups_list = list(group_names) if group_names else None
+            memory = store.set_scope(memory_id, scope, groups_list)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
 
         if memory is None:
             console.print(f"[red]Memory not found: {memory_id}[/red]")
             sys.exit(1)
 
-        if unshare_all:
-            console.print(f"[green]Removed {memory_id} from all groups[/green]")
-        else:
-            console.print(f"[green]Removed {memory_id} from: {', '.join(groups)}[/green]")
-        console.print(f"  Now shared with: {', '.join(memory.shared_groups) or 'none'}")
+        console.print(f"[green]Changed scope of {memory_id} to: {scope}[/green]")
+        if scope == "group":
+            console.print(f"  Owner groups: {', '.join(memory.groups)}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -974,20 +1067,44 @@ def unshare(
 @main.command()
 @click.argument("memory_id")
 @click.option("--from-project", type=click.Path(exists=True), help="Source project path")
+@click.option(
+    "--to-group",
+    "to_group",
+    multiple=True,
+    help="Promote to group scope with these owner groups (can specify multiple)",
+)
 @click.pass_context
-def promote(ctx: click.Context, memory_id: str, from_project: str | None) -> None:
-    """Promote a project memory to global scope."""
+def promote(
+    ctx: click.Context,
+    memory_id: str,
+    from_project: str | None,
+    to_group: tuple[str, ...],
+) -> None:
+    """Promote a project memory to global or group scope.
+
+    By default promotes to global scope (visible everywhere).
+    Use --to-group to promote to group scope instead.
+    """
     config: Config = ctx.obj["config"]
     project_path = Path(from_project) if from_project else get_current_project_path()
 
     with get_store(config, project_path) as store:
-        memory = store.promote_to_global(memory_id, Path(from_project) if from_project else None)
+        groups = list(to_group) if to_group else None
+        memory = store.promote(
+            memory_id,
+            from_project=Path(from_project) if from_project else None,
+            to_group=groups,
+        )
 
         if memory is None:
             console.print(f"[red]Memory not found in project: {memory_id}[/red]")
             sys.exit(1)
 
-        console.print(f"[green]Promoted to global: {memory.id}[/green]")
+        if groups:
+            console.print(f"[green]Promoted to group scope: {memory.id}[/green]")
+            console.print(f"  Owner groups: {', '.join(memory.groups)}")
+        else:
+            console.print(f"[green]Promoted to global scope: {memory.id}[/green]")
         console.print(f"  Content: {truncate_text(memory.content, 60)}")
 
 
@@ -998,15 +1115,19 @@ def promote(ctx: click.Context, memory_id: str, from_project: str | None) -> Non
 )
 @click.pass_context
 def unpromote(ctx: click.Context, memory_id: str, to_project: str) -> None:
-    """Move a global memory to a specific project."""
+    """Move a global or group memory to a specific project."""
     config: Config = ctx.obj["config"]
     project_path = get_current_project_path()
 
     with get_store(config, project_path) as store:
-        memory = store.unpromote_to_project(memory_id, Path(to_project))
+        try:
+            memory = store.unpromote(memory_id, Path(to_project))
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
 
         if memory is None:
-            console.print(f"[red]Global memory not found: {memory_id}[/red]")
+            console.print(f"[red]Global/group memory not found: {memory_id}[/red]")
             sys.exit(1)
 
         console.print(f"[green]Moved to project: {memory.id}[/green]")
@@ -1277,7 +1398,7 @@ def startup(
         if as_json:
             data = {
                 "pinned_memories": [m.to_dict() for m in context.pinned_memories],
-                "group_shared_memories": [m.to_dict() for m in context.group_shared_memories],
+                "group_memories": [m.to_dict() for m in context.group_memories],
                 "has_previous_session": context.has_previous_session,
                 "previous_session_id": context.previous_session_id,
                 "previous_session_summaries": [
@@ -1291,15 +1412,13 @@ def startup(
                 for m in context.pinned_memories:
                     console.print(f"  [red]*[/red] {truncate_text(m.content, 70)}")
 
-            if context.group_shared_memories:
-                console.print(
-                    f"\n[bold]Group-Shared Memories[/bold] ({len(context.group_shared_memories)})"
-                )
-                for m in context.group_shared_memories:
-                    # Show which project this came from
-                    source = m.project_path or "unknown"
+            if context.group_memories:
+                console.print(f"\n[bold]Group Memories[/bold] ({len(context.group_memories)})")
+                for m in context.group_memories:
+                    # Show owner groups
+                    groups_str = ", ".join(m.groups) if m.groups else "none"
                     console.print(f"  [blue]*[/blue] {truncate_text(m.content, 60)}")
-                    console.print(f"      [dim]from: {source}[/dim]")
+                    console.print(f"      [dim]groups: {groups_str}[/dim]")
 
             if context.has_previous_session:
                 console.print(f"\n[bold]Previous Session[/bold]: {context.previous_session_id}")
