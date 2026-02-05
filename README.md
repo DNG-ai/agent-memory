@@ -174,23 +174,48 @@ agent-memory config set semantic.provider=claude
 
 ## Integration
 
+The install script will prompt you to automatically install integrations. Each integration includes two parts:
+
+1. **Rules** (auto-loaded) - Core behaviors that run every session (startup, auto-save, session end)
+2. **Skill** (on-demand) - Full command reference documentation
+
 ### OpenCode
 
-Copy the skill to your OpenCode skills directory:
-
 ```bash
-cp -r integrations/opencode ~/.config/opencode/skills/agent-memory
+# Rules (auto-loaded every session)
+mkdir -p ~/.config/opencode/rules
+cp integrations/opencode/rules/agent-memory.md ~/.config/opencode/rules/
+
+# Skill (on-demand, load with /skill agent-memory)
+mkdir -p ~/.config/opencode/skills/agent-memory
+cp integrations/opencode/skills/agent-memory/SKILL.md ~/.config/opencode/skills/agent-memory/
 ```
 
-Then load it with `/skill agent-memory` or it will auto-load when relevant.
+The rules ensure the agent automatically:
+- Loads pinned memories at session start
+- Saves learnings during work
+- Summarizes sessions before ending
+
+Load the full skill with `/skill agent-memory` for detailed command reference.
 
 ### Claude Code
 
-Add the CLAUDE.md content to your project's CLAUDE.md file:
-
 ```bash
-cat integrations/claude-code/CLAUDE.md >> /path/to/project/CLAUDE.md
+# Rules (auto-loaded every session)
+mkdir -p ~/.claude/rules
+cp integrations/claude-code/rules/agent-memory.md ~/.claude/rules/
+
+# Skill (on-demand, load with /agent-memory)
+mkdir -p ~/.claude/skills/agent-memory
+cp integrations/claude-code/skills/agent-memory/SKILL.md ~/.claude/skills/agent-memory/
 ```
+
+The rules ensure the agent automatically:
+- Loads pinned memories at session start
+- Saves learnings during work
+- Summarizes sessions before ending
+
+Load the full skill with `/agent-memory` for detailed command reference.
 
 ## Storage Layout
 

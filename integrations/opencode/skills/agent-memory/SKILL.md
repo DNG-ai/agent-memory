@@ -1,26 +1,23 @@
 ---
 name: agent-memory
-description: Long-term memory store for AI agents - save, search, and manage persistent memories across sessions
+description: Long-term memory store for AI agents - save, search, and manage persistent memories across sessions. Load this skill for complete command reference.
 version: 0.1.0
 ---
 
-# Agent Memory Skill
+# Agent Memory - Full Reference
 
-This skill provides long-term memory capabilities for OpenCode agents. It allows you to save learnings, decisions, and context that persist across sessions.
+This skill provides complete documentation for the `agent-memory` CLI. Core behaviors (startup, auto-save, session end) are handled by the rules file which is always loaded.
 
 ## Setup
 
-The agent-memory CLI must be installed and accessible. Set the environment variable:
+The agent-memory CLI must be installed and accessible:
 
 ```bash
-export AGENT_MEMORY_PATH=~/.agent-memory
-```
+# Check if installed
+agent-memory --version
 
-Or install globally:
-
-```bash
-cd ~/workspace/agent-memory
-pip install -e .
+# If not in PATH, activate it
+source ~/.agent-memory/bin/activate-memory
 ```
 
 ## Commands
@@ -134,14 +131,6 @@ Use this command to get startup context:
 ```bash
 agent-memory startup --json
 ```
-
-## Auto-save Triggers
-
-When autosave is enabled, save memories automatically when:
-
-1. **Completing a todo item** - Save what was done and any learnings
-2. **User says "remember this"** - Save the referenced information
-3. **Session summary interval** - Every N messages, summarize the session
 
 ## Memory Categories
 
