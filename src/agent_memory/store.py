@@ -424,3 +424,245 @@ class MemoryStore:
     def __exit__(self, *args: Any) -> None:
         """Context manager exit."""
         self.close()
+
+    # ─────────────────────────────────────────────────────────────
+    # CROSS-PROJECT METHODS (for user visibility, not agents)
+    # ─────────────────────────────────────────────────────────────
+
+    def list_all_projects(
+        self,
+        category: str | None = None,
+        pinned_only: bool = False,
+        limit_per_project: int = 50,
+        include_global: bool = True,
+    ) -> list[tuple[Path | None, list[Memory]]]:
+        """
+        List memories from all projects.
+
+        This is for USER visibility across projects, not for agents.
+        Agents should only access current project + global.
+
+        Args:
+            category: Filter by category
+            pinned_only: Only return pinned memories
+            limit_per_project: Max memories per project
+            include_global: Include global memories
+
+        Returns:
+            List of (project_path, memories) tuples.
+            project_path is None for global memories.
+        """
+        results: list[tuple[Path | None, list[Memory]]] = []
+
+        # Include global memories first
+        if include_global:
+            global_memories = self._query_db_file(
+                self.global_db_path,
+                category=category,
+                pinned_only=pinned_only,
+                limit=limit_per_project,
+            )
+            if global_memories:
+                results.append((None, global_memories))
+
+        # Scan all project directories
+        if self.config.projects_path.exists():
+            for project_dir in sorted(self.config.projects_path.iterdir()):
+                if not project_dir.is_dir():
+                    continue
+
+                db_path = project_dir / "memories.db"
+                if not db_path.exists():
+                    continue
+
+                # Resolve original project path
+                ref_file = project_dir / ".project_path"
+                if ref_file.exists():
+                    original_path = Path(ref_file.read_text().strip())
+                else:
+                    original_path = project_dir
+
+                memories = self._query_db_file(
+                    db_path,
+                    category=category,
+                    pinned_only=pinned_only,
+                    limit=limit_per_project,
+                )
+                if memories:
+                    results.append((original_path, memories))
+
+        return results
+
+    def search_all_projects(
+        self,
+        query: str,
+        limit_per_project: int = 10,
+        include_global: bool = True,
+    ) -> list[tuple[Path | None, list[Memory]]]:
+        """
+        Search memories across all projects by keyword.
+
+        This is for USER visibility across projects, not for agents.
+        Agents should only access current project + global.
+
+        Args:
+            query: Search query
+            limit_per_project: Max results per project
+            include_global: Include global memories
+
+        Returns:
+            List of (project_path, memories) tuples.
+            project_path is None for global memories.
+        """
+        results: list[tuple[Path | None, list[Memory]]] = []
+
+        # Search global memories first
+        if include_global:
+            global_memories = self._search_db_file(
+                self.global_db_path,
+                query=query,
+                limit=limit_per_project,
+            )
+            if global_memories:
+                results.append((None, global_memories))
+
+        # Scan all project directories
+        if self.config.projects_path.exists():
+            for project_dir in sorted(self.config.projects_path.iterdir()):
+                if not project_dir.is_dir():
+                    continue
+
+                db_path = project_dir / "memories.db"
+                if not db_path.exists():
+                    continue
+
+                # Resolve original project path
+                ref_file = project_dir / ".project_path"
+                if ref_file.exists():
+                    original_path = Path(ref_file.read_text().strip())
+                else:
+                    original_path = project_dir
+
+                memories = self._search_db_file(
+                    db_path,
+                    query=query,
+                    limit=limit_per_project,
+                )
+                if memories:
+                    results.append((original_path, memories))
+
+        return results
+
+    def get_all_project_stats(self) -> list[dict[str, Any]]:
+        """
+        Get statistics for all tracked projects.
+
+        Returns:
+            List of dicts with project_path, memory_count, last_updated
+        """
+        stats: list[dict[str, Any]] = []
+
+        if not self.config.projects_path.exists():
+            return stats
+
+        for project_dir in sorted(self.config.projects_path.iterdir()):
+            if not project_dir.is_dir():
+                continue
+
+            db_path = project_dir / "memories.db"
+            if not db_path.exists():
+                continue
+
+            # Resolve original project path
+            ref_file = project_dir / ".project_path"
+            if ref_file.exists():
+                original_path = Path(ref_file.read_text().strip())
+            else:
+                original_path = project_dir
+
+            # Get stats from database
+            try:
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.execute("SELECT COUNT(*) FROM memories")
+                count = cursor.fetchone()[0]
+
+                cursor = conn.execute("SELECT MAX(updated_at) FROM memories")
+                last_updated = cursor.fetchone()[0]
+                conn.close()
+
+                stats.append(
+                    {
+                        "project_path": original_path,
+                        "memory_count": count,
+                        "last_updated": parse_timestamp(last_updated) if last_updated else None,
+                    }
+                )
+            except Exception:
+                # Skip projects with corrupted databases
+                continue
+
+        return stats
+
+    def _query_db_file(
+        self,
+        db_path: Path,
+        category: str | None = None,
+        pinned_only: bool = False,
+        limit: int = 50,
+    ) -> list[Memory]:
+        """Query a specific database file."""
+        if not db_path.exists():
+            return []
+
+        try:
+            conn = sqlite3.connect(str(db_path))
+            query = "SELECT * FROM memories WHERE 1=1"
+            params: list[Any] = []
+
+            if category:
+                query += " AND category = ?"
+                params.append(category)
+
+            if pinned_only:
+                query += " AND pinned = 1"
+
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+
+            cursor = conn.execute(query, params)
+            memories = [Memory.from_row(row) for row in cursor.fetchall()]
+            conn.close()
+
+            # Filter expired
+            return [m for m in memories if not is_expired(m.expires_at)]
+        except Exception:
+            return []
+
+    def _search_db_file(
+        self,
+        db_path: Path,
+        query: str,
+        limit: int = 10,
+    ) -> list[Memory]:
+        """Search a specific database file by keyword."""
+        if not db_path.exists():
+            return []
+
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.execute(
+                """
+                SELECT * FROM memories 
+                WHERE content LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (f"%{query}%", limit),
+            )
+            memories = [Memory.from_row(row) for row in cursor.fetchall()]
+            conn.close()
+
+            # Filter expired
+            return [m for m in memories if not is_expired(m.expires_at)]
+        except Exception:
+            return []

@@ -93,6 +93,41 @@ def display_memories_table(memories: list[Memory], title: str = "Memories") -> N
     console.print(table)
 
 
+def display_cross_project_memories(
+    results: list[tuple[Path | None, list[Memory]]],
+    title: str = "Memories (All Projects)",
+) -> None:
+    """Display memories from multiple projects in a table."""
+    total_count = sum(len(memories) for _, memories in results)
+    if total_count == 0:
+        console.print("[dim]No memories found.[/dim]")
+        return
+
+    table = Table(title=f"{title} ({total_count} total)")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Pin", style="red", width=3)
+    table.add_column("Category", style="green")
+    table.add_column("Content", style="white")
+    table.add_column("Project", style="blue")
+
+    for project_path, memories in results:
+        project_label = "GLOBAL" if project_path is None else str(project_path)
+        # Shorten long paths
+        if project_path and len(project_label) > 40:
+            project_label = "..." + project_label[-37:]
+
+        for memory in memories:
+            table.add_row(
+                memory.id,
+                "*" if memory.pinned else "",
+                memory.category,
+                truncate_text(memory.content, 45),
+                project_label,
+            )
+
+    console.print(table)
+
+
 @click.group()
 @click.version_option()
 @click.pass_context
@@ -100,6 +135,40 @@ def main(ctx: click.Context) -> None:
     """Agent Memory - Long-term memory store for AI agents."""
     ctx.ensure_object(dict)
     ctx.obj["config"] = load_config()
+
+
+# ─────────────────────────────────────────────────────────────
+# PROJECTS COMMAND (cross-project visibility for users)
+# ─────────────────────────────────────────────────────────────
+@main.command()
+@click.pass_context
+def projects(ctx: click.Context) -> None:
+    """List all tracked projects with memory counts."""
+    config: Config = ctx.obj["config"]
+
+    with get_store(config) as store:
+        stats = store.get_all_project_stats()
+
+        if not stats:
+            console.print("[dim]No projects with memories found.[/dim]")
+            return
+
+        table = Table(title="Tracked Projects")
+        table.add_column("Project", style="blue")
+        table.add_column("Memories", style="cyan", justify="right")
+        table.add_column("Last Updated", style="dim")
+
+        for stat in stats:
+            last_updated = (
+                stat["last_updated"].strftime("%Y-%m-%d %H:%M") if stat["last_updated"] else "Never"
+            )
+            table.add_row(
+                str(stat["project_path"]),
+                str(stat["memory_count"]),
+                last_updated,
+            )
+
+        console.print(table)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -169,6 +238,11 @@ def save(
     type=click.Choice(["factual", "decision", "task_history", "session_summary"]),
     help="Filter by category",
 )
+@click.option(
+    "--all-projects",
+    is_flag=True,
+    help="Search across all projects (user visibility, not for agents)",
+)
 @click.pass_context
 def search(
     ctx: click.Context,
@@ -177,11 +251,34 @@ def search(
     threshold: float | None,
     include_global: bool,
     category: str | None,
+    all_projects: bool,
 ) -> None:
     """Search memories by query."""
     config: Config = ctx.obj["config"]
-    project_path = get_current_project_path()
 
+    # Cross-project mode (for users, not agents)
+    if all_projects:
+        with get_store(config) as store:
+            results = store.search_all_projects(
+                query=query,
+                limit_per_project=limit,
+                include_global=True,
+            )
+
+            # Filter by category if specified
+            if category:
+                filtered_results = []
+                for project_path, memories in results:
+                    filtered = [m for m in memories if m.category == category]
+                    if filtered:
+                        filtered_results.append((project_path, filtered))
+                results = filtered_results
+
+            display_cross_project_memories(results, f"Search Results: '{query}'")
+        return
+
+    # Standard mode
+    project_path = get_current_project_path()
     results_found = False
 
     # Try semantic search first
@@ -242,6 +339,11 @@ def search(
     help="Filter by category",
 )
 @click.option("--limit", default=20, help="Maximum results")
+@click.option(
+    "--all-projects",
+    is_flag=True,
+    help="List from all projects (user visibility, not for agents)",
+)
 @click.pass_context
 def list_memories(
     ctx: click.Context,
@@ -249,9 +351,31 @@ def list_memories(
     pinned: bool,
     category: str | None,
     limit: int,
+    all_projects: bool,
 ) -> None:
     """List memories."""
     config: Config = ctx.obj["config"]
+
+    # Cross-project mode (for users, not agents)
+    if all_projects:
+        with get_store(config) as store:
+            results = store.list_all_projects(
+                category=category,
+                pinned_only=pinned,
+                limit_per_project=limit,
+                include_global=True,
+            )
+
+            title = "Memories (All Projects)"
+            if pinned:
+                title += " - Pinned"
+            if category:
+                title += f" [{category}]"
+
+            display_cross_project_memories(results, title)
+        return
+
+    # Standard mode
     scope = "global" if is_global else "project"
     project_path = None if is_global else get_current_project_path()
 
@@ -655,10 +779,62 @@ def config_set(ctx: click.Context, key_value: str) -> None:
     "--format", "output_format", type=click.Choice(["markdown", "json"]), default="markdown"
 )
 @click.option("--output", "-o", type=click.Path(), help="Output file (stdout if not specified)")
+@click.option(
+    "--all-projects",
+    is_flag=True,
+    help="Export from all projects (user visibility, not for agents)",
+)
 @click.pass_context
-def export(ctx: click.Context, output_format: str, output: str | None) -> None:
+def export(
+    ctx: click.Context,
+    output_format: str,
+    output: str | None,
+    all_projects: bool,
+) -> None:
     """Export memories to file."""
     config: Config = ctx.obj["config"]
+    from agent_memory.utils import get_timestamp
+
+    # Cross-project export
+    if all_projects:
+        with get_store(config) as store:
+            results = store.list_all_projects(
+                limit_per_project=1000,
+                include_global=True,
+            )
+
+            if output_format == "json":
+                data = {}
+                for project_path, memories in results:
+                    key = "global" if project_path is None else str(project_path)
+                    data[key] = [m.to_dict() for m in memories]
+                content = json.dumps(data, indent=2)
+            else:
+                lines = ["# Agent Memory Export (All Projects)\n"]
+                lines.append(f"Exported: {format_timestamp(get_timestamp())}\n")
+
+                for project_path, memories in results:
+                    if not memories:
+                        continue
+                    project_label = "Global" if project_path is None else str(project_path)
+                    lines.append(f"\n## {project_label}\n")
+                    for m in memories:
+                        pin = " [PINNED]" if m.pinned else ""
+                        lines.append(f"### {m.id}{pin}\n")
+                        lines.append(f"**Category:** {m.category}\n")
+                        lines.append(f"**Created:** {format_timestamp(m.created_at)}\n")
+                        lines.append(f"\n{m.content}\n")
+
+                content = "\n".join(lines)
+
+            if output:
+                Path(output).write_text(content)
+                console.print(f"[green]Exported to {output}[/green]")
+            else:
+                console.print(content)
+        return
+
+    # Standard export (current project + global)
     project_path = get_current_project_path()
 
     with get_store(config, project_path) as store:
@@ -674,7 +850,6 @@ def export(ctx: click.Context, output_format: str, output: str | None) -> None:
         else:
             lines = ["# Agent Memory Export\n"]
             lines.append(f"Project: {project_path}\n")
-            from agent_memory.utils import get_timestamp
 
             lines.append(f"Exported: {format_timestamp(get_timestamp())}\n")
 

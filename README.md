@@ -99,6 +99,31 @@ agent-memory startup --json
 | `startup` | Get startup context for agents |
 | `export` | Export memories to file |
 | `cleanup` | Remove expired memories |
+| `projects` | List all tracked projects |
+
+### Cross-Project Visibility (User Only)
+
+These flags provide visibility across ALL projects for users. Agents only access current project + global memories.
+
+| Flag | Commands | Description |
+|------|----------|-------------|
+| `--all-projects` | `list`, `search`, `export` | Include memories from all projects |
+
+```bash
+# List all tracked projects with memory counts
+agent-memory projects
+
+# List all memories across all projects (includes global)
+agent-memory list --all-projects
+
+# Search across all projects
+agent-memory search "authentication" --all-projects
+
+# Export all memories from all projects
+agent-memory export --all-projects --format=json -o all-memories.json
+```
+
+Note: The `--all-projects` flag is for user visibility and management. Agents (OpenCode, Claude Code) only have access to the current project's memories plus global memories.
 
 ## Memory Categories
 
