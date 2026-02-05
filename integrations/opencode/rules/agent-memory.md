@@ -35,11 +35,16 @@ agent-memory save --category=decision "User prefers functional components over c
 agent-memory save --pin "CRITICAL: Never modify the legacy auth module directly"
 ```
 
-## Group Sharing (IMPORTANT)
+## Group Management (IMPORTANT)
 
-**DO NOT share memories with groups unless the user explicitly requests it.**
+**Only manage workspace groups when the user explicitly asks.**
 
-Memories are private to the current project by default. Only use `--share` when the user specifically asks to share information across related projects.
+Group operations affect multiple projects and should be under user control:
+- `group create/delete/join/leave` - Only when user requests
+- `share/unshare` - Only when user requests
+- `--share` flag on save - Only when user requests
+
+Do not proactively create groups, add projects to groups, or share memories with groups. Memories are private to the current project by default.
 
 ```bash
 # ONLY when user explicitly asks to share across projects:
