@@ -9,6 +9,9 @@ Long-term memory store for AI agents. Enables agents (OpenCode, Claude Code) to 
 - **Session Management** - Track sessions and create summaries
 - **Multi-scope** - Project-specific and global memories
 - **Pinned Memories** - Mark critical information to always load at startup
+- **Workspace Groups** - Group related projects to share memories between them
+- **Cross-Project Sharing** - Share specific memories with project groups
+- **Promote/Unpromote** - Move memories between project and global scope
 - **Auto-expiration** - Optionally expire old memories
 
 ## Installation
@@ -91,6 +94,26 @@ agent-memory startup --json
 | `config show` | Show current configuration |
 | `config set <key>=<value>` | Update configuration |
 
+### Group Commands
+
+| Command | Description |
+|---------|-------------|
+| `group create <name>` | Create a new workspace group |
+| `group delete <name>` | Delete a workspace group |
+| `group join <name>` | Add current project to a group |
+| `group leave <name>` | Remove current project from a group |
+| `group list` | List all workspace groups |
+| `group show <name>` | Show group details |
+
+### Sharing Commands
+
+| Command | Description |
+|---------|-------------|
+| `share <id> <groups...>` | Share a memory with groups |
+| `unshare <id> [groups...]` | Remove a memory from groups |
+| `promote <id>` | Move project memory to global scope |
+| `unpromote <id>` | Move global memory to a project |
+
 ### Other Commands
 
 | Command | Description |
@@ -124,6 +147,69 @@ agent-memory export --all-projects --format=json -o all-memories.json
 ```
 
 Note: The `--all-projects` flag is for user visibility and management. Agents (OpenCode, Claude Code) only have access to the current project's memories plus global memories.
+
+## Workspace Groups
+
+Workspace groups allow you to create collections of related projects that can share memories with each other. This is useful for microservices architectures, monorepos, or any collection of related projects.
+
+### Creating and Managing Groups
+
+```bash
+# Create a workspace group
+agent-memory group create backend-services
+
+# Add projects to the group
+cd /path/to/project-a
+agent-memory group join backend-services
+
+cd /path/to/project-b
+agent-memory group join backend-services
+
+# List all groups
+agent-memory group list
+
+# Show group details
+agent-memory group show backend-services
+```
+
+### Sharing Memories with Groups
+
+Memories are private by default. You can explicitly share memories with groups:
+
+```bash
+# Save and share with a group
+agent-memory save --pin --share=backend-services "All services must use structured logging"
+
+# Share an existing memory
+agent-memory share mem_abc123 backend-services
+
+# Unshare from specific groups
+agent-memory unshare mem_abc123 backend-services
+
+# Unshare from all groups
+agent-memory unshare mem_abc123 --all
+```
+
+### How Sharing Works
+
+When an agent starts a session:
+1. **Project memories** - Always loaded (from current project)
+2. **Global memories** - Always loaded (from ~/.agent-memory/global)
+3. **Group-shared memories** - Pinned memories from sibling projects that are shared with groups you belong to
+
+This allows teams to share critical decisions, patterns, and conventions across related projects.
+
+### Promote/Unpromote
+
+Move memories between project and global scope:
+
+```bash
+# Promote a project memory to global (moves, not copies)
+agent-memory promote mem_abc123
+
+# Move a global memory back to a specific project
+agent-memory unpromote mem_abc123 --to-project /path/to/project
+```
 
 ## Memory Categories
 
@@ -163,6 +249,7 @@ autosave:
 startup:
   auto_load_pinned: true
   ask_load_previous_session: true
+  include_group_shared_pins: true  # Load pinned memories from group siblings
 
 expiration:
   enabled: false
@@ -247,6 +334,7 @@ Load the full skill with `/agent-memory` for detailed command reference.
 ```
 ~/.agent-memory/
 ├── config.yaml           # Configuration
+├── groups.yaml           # Workspace group definitions
 ├── global/
 │   ├── memories.db       # Global SQLite database
 │   ├── vectors/          # Global LanceDB vectors

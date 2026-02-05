@@ -20,6 +20,7 @@ class StartupContext:
     """Context loaded at session start."""
 
     pinned_memories: list[Memory]
+    group_shared_memories: list[Memory]  # Pinned memories shared from sibling projects
     has_previous_session: bool
     previous_session_id: str | None
     previous_session_summaries: list[Memory]
@@ -28,6 +29,7 @@ class StartupContext:
         """Convert to dictionary for display."""
         return {
             "pinned_count": len(self.pinned_memories),
+            "group_shared_count": len(self.group_shared_memories),
             "has_previous_session": self.has_previous_session,
             "previous_session_id": self.previous_session_id,
             "summary_count": len(self.previous_session_summaries),
@@ -71,15 +73,22 @@ class RelevanceEngine:
         self.store = store
         self.vector_store = vector_store
 
-    def get_startup_context(self, project_path: Path) -> StartupContext:
+    def get_startup_context(
+        self,
+        project_path: Path,
+        include_group_shared: bool | None = None,
+    ) -> StartupContext:
         """Get context to load at session start.
 
         This includes:
         - All pinned memories (always loaded)
+        - Group-shared pinned memories from sibling projects (if enabled)
         - Previous session info (for user prompt)
 
         Args:
             project_path: The project path
+            include_group_shared: Whether to include group-shared memories.
+                                  Uses config default if not specified.
 
         Returns:
             StartupContext with memories to load
@@ -97,6 +106,20 @@ class RelevanceEngine:
             pinned_memories.extend(self.store.list_pinned("global"))
         except Exception:
             pass
+
+        # Get group-shared pinned memories from sibling projects
+        group_shared_memories: list[Memory] = []
+        should_include_group_shared = (
+            include_group_shared
+            if include_group_shared is not None
+            else self.config.startup.include_group_shared_pins
+        )
+
+        if should_include_group_shared:
+            try:
+                group_shared_memories = self._get_group_shared_pinned_memories(project_path)
+            except Exception:
+                pass
 
         # Check for previous session
         previous_session_id = None
@@ -133,10 +156,60 @@ class RelevanceEngine:
 
         return StartupContext(
             pinned_memories=pinned_memories,
+            group_shared_memories=group_shared_memories,
             has_previous_session=has_previous_session,
             previous_session_id=previous_session_id,
             previous_session_summaries=previous_session_summaries,
         )
+
+    def _get_group_shared_pinned_memories(self, project_path: Path) -> list[Memory]:
+        """Get pinned memories shared with this project via groups.
+
+        Args:
+            project_path: The current project path
+
+        Returns:
+            List of pinned memories shared from sibling projects
+        """
+        from agent_memory.groups import GroupManager
+
+        group_manager = GroupManager(self.config)
+
+        # Get groups this project belongs to
+        groups = group_manager.get_groups_for_project(project_path)
+        if not groups:
+            return []
+
+        group_names = {g.name for g in groups}
+
+        # Get sibling projects (projects that share groups with us)
+        sibling_projects = group_manager.get_sibling_projects(project_path)
+        if not sibling_projects:
+            return []
+
+        shared_memories: list[Memory] = []
+        seen_ids: set[str] = set()
+
+        for sibling_path in sibling_projects:
+            try:
+                # Create a store for the sibling project
+                sibling_store = MemoryStore(self.config, sibling_path)
+
+                # Get pinned memories from sibling
+                pinned = sibling_store.list_pinned("project")
+
+                for memory in pinned:
+                    # Only include if shared with a group we're in
+                    if memory.shared_groups and any(g in group_names for g in memory.shared_groups):
+                        if memory.id not in seen_ids:
+                            shared_memories.append(memory)
+                            seen_ids.add(memory.id)
+
+                sibling_store.close()
+            except Exception:
+                continue
+
+        return shared_memories
 
     def get_relevant_memories(
         self,

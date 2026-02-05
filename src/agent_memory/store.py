@@ -30,6 +30,7 @@ class Memory:
     scope: str  # "project" or "global"
     project_path: str | None
     pinned: bool
+    shared_groups: list[str]  # List of group names this memory is shared with
     created_at: datetime
     updated_at: datetime
     expires_at: datetime | None
@@ -45,6 +46,7 @@ class Memory:
             "scope": self.scope,
             "project_path": self.project_path,
             "pinned": self.pinned,
+            "shared_groups": self.shared_groups,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
@@ -55,6 +57,12 @@ class Memory:
     @classmethod
     def from_row(cls, row: tuple[Any, ...]) -> Memory:
         """Create Memory from database row."""
+        # Handle both old schema (11 columns) and new schema (12 columns)
+        if len(row) >= 12:
+            shared_groups = deserialize_metadata(row[11]) if row[11] else []
+        else:
+            shared_groups = []
+
         return cls(
             id=row[0],
             content=row[1],
@@ -62,6 +70,7 @@ class Memory:
             scope=row[3],
             project_path=row[4],
             pinned=bool(row[5]),
+            shared_groups=shared_groups if isinstance(shared_groups, list) else [],
             created_at=parse_timestamp(row[6]),
             updated_at=parse_timestamp(row[7]),
             expires_at=parse_timestamp(row[8]) if row[8] else None,
@@ -134,7 +143,8 @@ class MemoryStore:
                 updated_at TEXT NOT NULL,
                 expires_at TEXT,
                 source TEXT NOT NULL,
-                metadata TEXT DEFAULT '{}'
+                metadata TEXT DEFAULT '{}',
+                shared_groups TEXT DEFAULT '[]'
             )
         """)
         conn.execute("""
@@ -146,6 +156,14 @@ class MemoryStore:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)
         """)
+
+        # Migration: Add shared_groups column if it doesn't exist
+        try:
+            conn.execute("ALTER TABLE memories ADD COLUMN shared_groups TEXT DEFAULT '[]'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
         conn.commit()
 
     def save(
@@ -157,6 +175,7 @@ class MemoryStore:
         source: str = "user_explicit",
         metadata: dict[str, Any] | None = None,
         expires_at: datetime | None = None,
+        shared_groups: list[str] | None = None,
     ) -> Memory:
         """Save a new memory.
 
@@ -168,6 +187,7 @@ class MemoryStore:
             source: Source of the memory
             metadata: Additional metadata
             expires_at: Optional expiration datetime
+            shared_groups: List of group names to share this memory with
 
         Returns:
             The created Memory object
@@ -175,6 +195,7 @@ class MemoryStore:
         memory_id = generate_memory_id()
         now = get_timestamp()
         category = normalize_category(category, content)
+        shared_groups = shared_groups or []
 
         project_path_str = str(self.project_path) if self.project_path else None
 
@@ -183,8 +204,8 @@ class MemoryStore:
             """
             INSERT INTO memories 
             (id, content, category, scope, project_path, pinned, 
-             created_at, updated_at, expires_at, source, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             created_at, updated_at, expires_at, source, metadata, shared_groups)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_id,
@@ -198,6 +219,7 @@ class MemoryStore:
                 expires_at.isoformat() if expires_at else None,
                 source,
                 serialize_metadata(metadata),
+                serialize_metadata(shared_groups),
             ),
         )
         conn.commit()
@@ -209,6 +231,7 @@ class MemoryStore:
             scope=scope,
             project_path=project_path_str,
             pinned=pinned,
+            shared_groups=shared_groups,
             created_at=now,
             updated_at=now,
             expires_at=expires_at,
@@ -347,6 +370,159 @@ class MemoryStore:
     def unpin(self, memory_id: str, scope: str = "project") -> Memory | None:
         """Unpin a memory."""
         return self.update(memory_id, scope, pinned=False)
+
+    def share(
+        self,
+        memory_id: str,
+        group_names: list[str],
+        scope: str = "project",
+    ) -> Memory | None:
+        """Share a memory with one or more groups.
+
+        Args:
+            memory_id: ID of the memory to share
+            group_names: List of group names to share with
+            scope: "project" or "global"
+
+        Returns:
+            Updated memory or None if not found
+        """
+        memory = self.get(memory_id, scope)
+        if memory is None:
+            return None
+
+        # Merge with existing shared groups
+        current_groups = set(memory.shared_groups)
+        current_groups.update(group_names)
+        new_groups = sorted(current_groups)
+
+        conn = self._get_conn(scope)
+        now = get_timestamp()
+
+        conn.execute(
+            "UPDATE memories SET shared_groups = ?, updated_at = ? WHERE id = ?",
+            (serialize_metadata(new_groups), now.isoformat(), memory_id),
+        )
+        conn.commit()
+
+        return self.get(memory_id, scope)
+
+    def unshare(
+        self,
+        memory_id: str,
+        group_names: list[str] | None = None,
+        scope: str = "project",
+    ) -> Memory | None:
+        """Remove a memory from one or more groups.
+
+        Args:
+            memory_id: ID of the memory to unshare
+            group_names: List of group names to remove from (None = remove from all)
+            scope: "project" or "global"
+
+        Returns:
+            Updated memory or None if not found
+        """
+        memory = self.get(memory_id, scope)
+        if memory is None:
+            return None
+
+        if group_names is None:
+            # Remove from all groups
+            new_groups: list[str] = []
+        else:
+            # Remove only specified groups
+            new_groups = [g for g in memory.shared_groups if g not in group_names]
+
+        conn = self._get_conn(scope)
+        now = get_timestamp()
+
+        conn.execute(
+            "UPDATE memories SET shared_groups = ?, updated_at = ? WHERE id = ?",
+            (serialize_metadata(new_groups), now.isoformat(), memory_id),
+        )
+        conn.commit()
+
+        return self.get(memory_id, scope)
+
+    def promote_to_global(
+        self,
+        memory_id: str,
+        from_project: Path | None = None,
+    ) -> Memory | None:
+        """Move a memory from project scope to global scope.
+
+        Args:
+            memory_id: ID of the memory to promote
+            from_project: Project path (uses current project if None)
+
+        Returns:
+            The new global memory or None if not found
+        """
+        # Use specified project or current project
+        if from_project is not None:
+            source_store = MemoryStore(self.config, from_project)
+        else:
+            source_store = self
+
+        # Get memory from project
+        memory = source_store.get(memory_id, "project")
+        if memory is None:
+            return None
+
+        # Save to global
+        global_memory = self.save(
+            content=memory.content,
+            category=memory.category,
+            scope="global",
+            pinned=memory.pinned,
+            source=memory.source,
+            metadata=memory.metadata,
+            shared_groups=memory.shared_groups,
+        )
+
+        # Delete from project
+        source_store.delete(memory_id, "project")
+
+        return global_memory
+
+    def unpromote_to_project(
+        self,
+        memory_id: str,
+        to_project: Path,
+    ) -> Memory | None:
+        """Move a memory from global scope to a specific project.
+
+        Args:
+            memory_id: ID of the global memory to unpromote
+            to_project: Target project path
+
+        Returns:
+            The new project memory or None if not found
+        """
+        # Get memory from global
+        memory = self.get(memory_id, "global")
+        if memory is None:
+            return None
+
+        # Create store for target project
+        target_store = MemoryStore(self.config, to_project)
+
+        # Save to project
+        project_memory = target_store.save(
+            content=memory.content,
+            category=memory.category,
+            scope="project",
+            pinned=memory.pinned,
+            source=memory.source,
+            metadata=memory.metadata,
+            shared_groups=memory.shared_groups,
+        )
+
+        # Delete from global
+        self.delete(memory_id, "global")
+
+        return project_memory
 
     def delete(self, memory_id: str, scope: str = "project") -> bool:
         """Delete a memory."""

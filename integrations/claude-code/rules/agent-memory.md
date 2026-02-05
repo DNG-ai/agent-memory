@@ -10,7 +10,11 @@ At the beginning of EVERY session, run:
 agent-memory startup --json
 ```
 
-This loads pinned memories (critical context) and offers to restore previous session context.
+This loads:
+- Pinned memories (critical context for this project)
+- Global pinned memories (cross-project context)
+- Group-shared memories (from sibling projects in workspace groups)
+- Previous session info
 
 ## Auto-Save Triggers
 
@@ -29,6 +33,17 @@ agent-memory save --category=decision "User prefers functional components over c
 
 # Pin critical information (always loaded at startup)
 agent-memory save --pin "CRITICAL: Never modify the legacy auth module directly"
+```
+
+## Group Sharing (IMPORTANT)
+
+**DO NOT share memories with groups unless the user explicitly requests it.**
+
+Memories are private to the current project by default. Only use `--share` when the user specifically asks to share information across related projects.
+
+```bash
+# ONLY when user explicitly asks to share across projects:
+agent-memory save --share=mygroup "Shared API pattern for all microservices"
 ```
 
 ## Session End

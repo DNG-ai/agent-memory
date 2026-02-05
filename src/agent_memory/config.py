@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "startup": {
         "auto_load_pinned": True,
         "ask_load_previous_session": True,
+        "include_group_shared_pins": True,
     },
     "expiration": {
         "enabled": False,
@@ -84,6 +85,7 @@ class StartupConfig:
 
     auto_load_pinned: bool = True
     ask_load_previous_session: bool = True
+    include_group_shared_pins: bool = True  # Include pinned memories from group-shared projects
 
 
 @dataclass
@@ -205,6 +207,7 @@ def _build_config(base_path: Path, data: dict[str, Any]) -> Config:
     startup = StartupConfig(
         auto_load_pinned=startup_data.get("auto_load_pinned", True),
         ask_load_previous_session=startup_data.get("ask_load_previous_session", True),
+        include_group_shared_pins=startup_data.get("include_group_shared_pins", True),
     )
 
     expiration_data = data.get("expiration", {})

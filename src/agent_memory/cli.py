@@ -194,6 +194,12 @@ def projects(ctx: click.Context) -> None:
     type=click.Choice(["factual", "decision", "task_history", "session_summary"]),
     help="Memory category (auto-detected if not specified)",
 )
+@click.option(
+    "--share",
+    "share_groups",
+    multiple=True,
+    help="Share with group(s). Can be specified multiple times.",
+)
 @click.pass_context
 def save(
     ctx: click.Context,
@@ -201,6 +207,7 @@ def save(
     is_global: bool,
     pin: bool,
     category: str | None,
+    share_groups: tuple[str, ...],
 ) -> None:
     """Save a new memory."""
     config: Config = ctx.obj["config"]
@@ -214,6 +221,7 @@ def save(
             scope=scope,
             pinned=pin,
             source="user_explicit",
+            shared_groups=list(share_groups) if share_groups else None,
         )
 
         # Add to vector store
@@ -234,6 +242,8 @@ def save(
     console.print(f"  Content: {truncate_text(content, 80)}")
     if pin:
         console.print("  [red]Pinned[/red]")
+    if share_groups:
+        console.print(f"  [blue]Shared with: {', '.join(share_groups)}[/blue]")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -355,6 +365,10 @@ def search(
     is_flag=True,
     help="List from all projects (user visibility, not for agents)",
 )
+@click.option("--shared", is_flag=True, help="Show only memories shared with any group")
+@click.option(
+    "--shared-with", "shared_with_group", help="Show memories shared with a specific group"
+)
 @click.pass_context
 def list_memories(
     ctx: click.Context,
@@ -363,6 +377,8 @@ def list_memories(
     category: str | None,
     limit: int,
     all_projects: bool,
+    shared: bool,
+    shared_with_group: str | None,
 ) -> None:
     """List memories."""
     config: Config = ctx.obj["config"]
@@ -377,9 +393,25 @@ def list_memories(
                 include_global=True,
             )
 
+            # Filter by shared status if requested
+            if shared or shared_with_group:
+                filtered_results = []
+                for project_path, memories in results:
+                    if shared_with_group:
+                        filtered = [m for m in memories if shared_with_group in m.shared_groups]
+                    else:
+                        filtered = [m for m in memories if m.shared_groups]
+                    if filtered:
+                        filtered_results.append((project_path, filtered))
+                results = filtered_results
+
             title = "Memories (All Projects)"
             if pinned:
                 title += " - Pinned"
+            if shared:
+                title += " - Shared"
+            if shared_with_group:
+                title += f" - Shared with '{shared_with_group}'"
             if category:
                 title += f" [{category}]"
 
@@ -398,9 +430,19 @@ def list_memories(
             limit=limit,
         )
 
+        # Filter by shared status if requested
+        if shared:
+            memories = [m for m in memories if m.shared_groups]
+        if shared_with_group:
+            memories = [m for m in memories if shared_with_group in m.shared_groups]
+
         title = f"{'Global' if is_global else 'Project'} Memories"
         if pinned:
             title += " (Pinned)"
+        if shared:
+            title += " (Shared)"
+        if shared_with_group:
+            title += f" (Shared with '{shared_with_group}')"
         if category:
             title += f" [{category}]"
 
@@ -721,6 +763,258 @@ def session_load(ctx: click.Context, last: bool, session_id: str | None) -> None
 
 
 # ─────────────────────────────────────────────────────────────
+# GROUP COMMANDS
+# ─────────────────────────────────────────────────────────────
+@main.group()
+def group() -> None:
+    """Workspace group management for cross-project sharing."""
+    pass
+
+
+@group.command("create")
+@click.argument("name")
+@click.pass_context
+def group_create(ctx: click.Context, name: str) -> None:
+    """Create a new workspace group."""
+    config: Config = ctx.obj["config"]
+
+    from agent_memory.groups import GroupManager
+
+    manager = GroupManager(config)
+
+    try:
+        grp = manager.create(name)
+        console.print(f"[green]Created group: {name}[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+
+@group.command("delete")
+@click.argument("name")
+@click.option("--confirm", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def group_delete(ctx: click.Context, name: str, confirm: bool) -> None:
+    """Delete a workspace group."""
+    config: Config = ctx.obj["config"]
+
+    from agent_memory.groups import GroupManager
+
+    manager = GroupManager(config)
+
+    if not confirm:
+        if not click.confirm(f"Delete group '{name}'? Memories will become project-private."):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    if manager.delete(name):
+        console.print(f"[green]Deleted group: {name}[/green]")
+    else:
+        console.print(f"[red]Group not found: {name}[/red]")
+        sys.exit(1)
+
+
+@group.command("join")
+@click.argument("name")
+@click.option("--project", type=click.Path(exists=True), help="Project path (default: current)")
+@click.pass_context
+def group_join(ctx: click.Context, name: str, project: str | None) -> None:
+    """Add a project to a workspace group."""
+    config: Config = ctx.obj["config"]
+
+    from agent_memory.groups import GroupManager
+
+    manager = GroupManager(config)
+    project_path = Path(project) if project else get_current_project_path()
+
+    try:
+        grp = manager.add_project(name, project_path)
+        console.print(f"[green]Added {project_path} to group '{name}'[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+
+@group.command("leave")
+@click.argument("name")
+@click.option("--project", type=click.Path(exists=True), help="Project path (default: current)")
+@click.pass_context
+def group_leave(ctx: click.Context, name: str, project: str | None) -> None:
+    """Remove a project from a workspace group."""
+    config: Config = ctx.obj["config"]
+
+    from agent_memory.groups import GroupManager
+
+    manager = GroupManager(config)
+    project_path = Path(project) if project else get_current_project_path()
+
+    try:
+        grp = manager.remove_project(name, project_path)
+        console.print(f"[green]Removed {project_path} from group '{name}'[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+
+@group.command("list")
+@click.pass_context
+def group_list(ctx: click.Context) -> None:
+    """List all workspace groups."""
+    config: Config = ctx.obj["config"]
+
+    from agent_memory.groups import GroupManager
+
+    manager = GroupManager(config)
+    groups = manager.list_groups()
+
+    if not groups:
+        console.print("[dim]No workspace groups found.[/dim]")
+        return
+
+    console.print("\n[bold]Workspace Groups[/bold]\n")
+    for grp in groups:
+        console.print(f"[cyan]{grp.name}[/cyan]")
+        console.print(f"  Created: {grp.created_at.strftime('%Y-%m-%d')}")
+        console.print(f"  Projects: {len(grp.projects)}")
+        for proj in grp.projects:
+            console.print(f"    - {proj}")
+        console.print("")
+
+
+@group.command("show")
+@click.argument("name")
+@click.pass_context
+def group_show(ctx: click.Context, name: str) -> None:
+    """Show details of a workspace group."""
+    config: Config = ctx.obj["config"]
+
+    from agent_memory.groups import GroupManager
+
+    manager = GroupManager(config)
+    grp = manager.get(name)
+
+    if grp is None:
+        console.print(f"[red]Group not found: {name}[/red]")
+        sys.exit(1)
+
+    console.print(f"\n[bold]{grp.name}[/bold]")
+    console.print(f"  Created: {grp.created_at.strftime('%Y-%m-%d %H:%M')}")
+    console.print(f"\n[cyan]Projects ({len(grp.projects)}):[/cyan]")
+    for proj in grp.projects:
+        console.print(f"  - {proj}")
+
+
+# ─────────────────────────────────────────────────────────────
+# SHARE/UNSHARE COMMANDS
+# ─────────────────────────────────────────────────────────────
+@main.command()
+@click.argument("memory_id")
+@click.argument("groups", nargs=-1, required=True)
+@click.pass_context
+def share(ctx: click.Context, memory_id: str, groups: tuple[str, ...]) -> None:
+    """Share a memory with one or more groups."""
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    with get_store(config, project_path) as store:
+        # Try project first, then global
+        memory = store.share(memory_id, list(groups), "project")
+        if memory is None:
+            memory = store.share(memory_id, list(groups), "global")
+
+        if memory is None:
+            console.print(f"[red]Memory not found: {memory_id}[/red]")
+            sys.exit(1)
+
+        console.print(f"[green]Shared {memory_id} with: {', '.join(groups)}[/green]")
+        console.print(f"  Now shared with: {', '.join(memory.shared_groups) or 'none'}")
+
+
+@main.command()
+@click.argument("memory_id")
+@click.argument("groups", nargs=-1)
+@click.option("--all", "unshare_all", is_flag=True, help="Remove from all groups")
+@click.pass_context
+def unshare(
+    ctx: click.Context,
+    memory_id: str,
+    groups: tuple[str, ...],
+    unshare_all: bool,
+) -> None:
+    """Remove a memory from groups."""
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    if not groups and not unshare_all:
+        console.print("[red]Specify group names or --all[/red]")
+        sys.exit(1)
+
+    with get_store(config, project_path) as store:
+        group_list = None if unshare_all else list(groups)
+
+        # Try project first, then global
+        memory = store.unshare(memory_id, group_list, "project")
+        if memory is None:
+            memory = store.unshare(memory_id, group_list, "global")
+
+        if memory is None:
+            console.print(f"[red]Memory not found: {memory_id}[/red]")
+            sys.exit(1)
+
+        if unshare_all:
+            console.print(f"[green]Removed {memory_id} from all groups[/green]")
+        else:
+            console.print(f"[green]Removed {memory_id} from: {', '.join(groups)}[/green]")
+        console.print(f"  Now shared with: {', '.join(memory.shared_groups) or 'none'}")
+
+
+# ─────────────────────────────────────────────────────────────
+# PROMOTE/UNPROMOTE COMMANDS
+# ─────────────────────────────────────────────────────────────
+@main.command()
+@click.argument("memory_id")
+@click.option("--from-project", type=click.Path(exists=True), help="Source project path")
+@click.pass_context
+def promote(ctx: click.Context, memory_id: str, from_project: str | None) -> None:
+    """Promote a project memory to global scope."""
+    config: Config = ctx.obj["config"]
+    project_path = Path(from_project) if from_project else get_current_project_path()
+
+    with get_store(config, project_path) as store:
+        memory = store.promote_to_global(memory_id, Path(from_project) if from_project else None)
+
+        if memory is None:
+            console.print(f"[red]Memory not found in project: {memory_id}[/red]")
+            sys.exit(1)
+
+        console.print(f"[green]Promoted to global: {memory.id}[/green]")
+        console.print(f"  Content: {truncate_text(memory.content, 60)}")
+
+
+@main.command()
+@click.argument("memory_id")
+@click.option(
+    "--to-project", type=click.Path(exists=True), required=True, help="Target project path"
+)
+@click.pass_context
+def unpromote(ctx: click.Context, memory_id: str, to_project: str) -> None:
+    """Move a global memory to a specific project."""
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    with get_store(config, project_path) as store:
+        memory = store.unpromote_to_project(memory_id, Path(to_project))
+
+        if memory is None:
+            console.print(f"[red]Global memory not found: {memory_id}[/red]")
+            sys.exit(1)
+
+        console.print(f"[green]Moved to project: {memory.id}[/green]")
+        console.print(f"  Project: {to_project}")
+        console.print(f"  Content: {truncate_text(memory.content, 60)}")
+
+
+# ─────────────────────────────────────────────────────────────
 # CONFIG COMMANDS
 # ─────────────────────────────────────────────────────────────
 @main.group()
@@ -935,8 +1229,14 @@ def init(ctx: click.Context) -> None:
 # ─────────────────────────────────────────────────────────────
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--include-group-shared/--no-include-group-shared",
+    "include_group_shared",
+    default=None,
+    help="Include pinned memories shared from sibling projects via groups",
+)
 @click.pass_context
-def startup(ctx: click.Context, as_json: bool) -> None:
+def startup(ctx: click.Context, as_json: bool, include_group_shared: bool | None) -> None:
     """Get startup context for agent session."""
     config: Config = ctx.obj["config"]
     project_path = get_current_project_path()
@@ -947,11 +1247,12 @@ def startup(ctx: click.Context, as_json: bool) -> None:
         vector_store = get_vector_store(config, project_path)
         engine = RelevanceEngine(config, store, vector_store)
 
-        context = engine.get_startup_context(project_path)
+        context = engine.get_startup_context(project_path, include_group_shared)
 
         if as_json:
             data = {
                 "pinned_memories": [m.to_dict() for m in context.pinned_memories],
+                "group_shared_memories": [m.to_dict() for m in context.group_shared_memories],
                 "has_previous_session": context.has_previous_session,
                 "previous_session_id": context.previous_session_id,
                 "previous_session_summaries": [
@@ -964,6 +1265,16 @@ def startup(ctx: click.Context, as_json: bool) -> None:
                 console.print(f"\n[bold]Pinned Memories[/bold] ({len(context.pinned_memories)})")
                 for m in context.pinned_memories:
                     console.print(f"  [red]*[/red] {truncate_text(m.content, 70)}")
+
+            if context.group_shared_memories:
+                console.print(
+                    f"\n[bold]Group-Shared Memories[/bold] ({len(context.group_shared_memories)})"
+                )
+                for m in context.group_shared_memories:
+                    # Show which project this came from
+                    source = m.project_path or "unknown"
+                    console.print(f"  [blue]*[/blue] {truncate_text(m.content, 60)}")
+                    console.print(f"      [dim]from: {source}[/dim]")
 
             if context.has_previous_session:
                 console.print(f"\n[bold]Previous Session[/bold]: {context.previous_session_id}")
