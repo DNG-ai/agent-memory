@@ -61,6 +61,9 @@ agent-memory search "auth" --threshold=0.8
 # Include global memories
 agent-memory search "coding style" --global
 
+# Include group memories (works from any directory)
+agent-memory search "api pattern" --group=backend-team
+
 # Search across all projects (user visibility only)
 agent-memory search "api pattern" --all-projects
 ```
@@ -89,8 +92,27 @@ agent-memory list --group-owned
 # List memories owned by a specific group
 agent-memory list --owned-by=backend-team
 
+# List memories by group name (works from any directory)
+agent-memory list --group=backend-team
+agent-memory list --group=all  # all groups
+
 # List from all projects (user visibility only)
 agent-memory list --all-projects
+```
+
+### Quick Group Access
+
+View group info and memories quickly from anywhere:
+
+```bash
+# Quick view of group info + its memories
+agent-memory groups backend-team
+
+# View all group memories
+agent-memory groups all
+
+# Pinned only
+agent-memory groups backend-team --pinned
 ```
 
 ### Manage Memories

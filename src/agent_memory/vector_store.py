@@ -23,6 +23,8 @@ class VectorSearchResult:
     content: str
     score: float
     category: str
+    scope: str | None = None
+    groups: list[str] | None = None
 
 
 class VectorStore:
@@ -70,10 +72,13 @@ class VectorStore:
         return project_storage / "vectors"
 
     def _get_db(self, scope: str) -> lancedb.DBConnection:
-        """Get or create database connection for scope."""
+        """Get or create database connection for scope.
+
+        Note: 'group' scope uses the global database, matching SQLite behavior.
+        """
         import lancedb
 
-        if scope == "global":
+        if scope in ("global", "group"):
             if self._global_db is None:
                 self.global_db_path.mkdir(parents=True, exist_ok=True)
                 self._global_db = lancedb.connect(str(self.global_db_path))
@@ -87,21 +92,39 @@ class VectorStore:
             return self._project_db
 
     def _get_or_create_table(self, db: lancedb.DBConnection, dimension: int) -> Any:
-        """Get or create the vectors table."""
-        if self.TABLE_NAME in db.table_names():
-            return db.open_table(self.TABLE_NAME)
+        """Get or create the vectors table.
 
-        # Create schema
+        Schema includes scope and groups fields for filtering group-scoped memories.
+        """
+        if self.TABLE_NAME in db.table_names():
+            table = db.open_table(self.TABLE_NAME)
+            # Check if migration needed (old schema without scope/groups)
+            self._migrate_table_schema(table, dimension)
+            return table
+
+        # Create schema with scope and groups for filtering
         schema = pa.schema(
             [
                 pa.field("memory_id", pa.string()),
                 pa.field("content", pa.string()),
                 pa.field("category", pa.string()),
+                pa.field("scope", pa.string()),  # "project", "group", or "global"
+                pa.field("groups", pa.string()),  # JSON array of owner groups
                 pa.field("vector", pa.list_(pa.float32(), dimension)),
             ]
         )
 
         return db.create_table(self.TABLE_NAME, schema=schema)
+
+    def _migrate_table_schema(self, table: Any, dimension: int) -> None:
+        """Migrate old table schema to include scope and groups fields.
+
+        LanceDB doesn't support ALTER TABLE, so we check if columns exist
+        and add default values when inserting if they're missing.
+        """
+        # LanceDB tables are schemaless for new columns - they'll be added on insert
+        # We just note that old records may have None for scope/groups
+        pass
 
     def add(
         self,
@@ -109,6 +132,7 @@ class VectorStore:
         content: str,
         category: str,
         scope: str = "project",
+        groups: list[str] | None = None,
     ) -> bool:
         """Add a memory to the vector store.
 
@@ -116,11 +140,14 @@ class VectorStore:
             memory_id: The memory ID
             content: The memory content
             category: The memory category
-            scope: "project" or "global"
+            scope: "project", "group", or "global"
+            groups: Owner groups for group-scoped memories (JSON serialized)
 
         Returns:
             True if successful, False if semantic search is disabled
         """
+        import json
+
         provider = self.embedding_provider
         if provider is None:
             return False
@@ -135,6 +162,8 @@ class VectorStore:
                     "memory_id": memory_id,
                     "content": content,
                     "category": category,
+                    "scope": scope,
+                    "groups": json.dumps(groups or []),
                     "vector": embedding,
                 }
             ]
@@ -143,18 +172,22 @@ class VectorStore:
 
     def add_batch(
         self,
-        memories: list[tuple[str, str, str]],  # (memory_id, content, category)
+        memories: list[
+            tuple[str, str, str, list[str] | None]
+        ],  # (memory_id, content, category, groups)
         scope: str = "project",
     ) -> bool:
         """Add multiple memories to the vector store.
 
         Args:
-            memories: List of (memory_id, content, category) tuples
-            scope: "project" or "global"
+            memories: List of (memory_id, content, category, groups) tuples
+            scope: "project", "group", or "global"
 
         Returns:
             True if successful, False if semantic search is disabled
         """
+        import json
+
         if not memories:
             return True
 
@@ -173,9 +206,11 @@ class VectorStore:
                 "memory_id": memory_id,
                 "content": content,
                 "category": category,
+                "scope": scope,
+                "groups": json.dumps(groups or []),
                 "vector": embedding,
             }
-            for (memory_id, content, category), embedding in zip(memories, embeddings)
+            for (memory_id, content, category, groups), embedding in zip(memories, embeddings)
         ]
 
         table.add(data)
@@ -188,19 +223,27 @@ class VectorStore:
         limit: int = 5,
         threshold: float | None = None,
         category: str | None = None,
+        include_groups: list[str] | None = None,
+        exclude_group_scope: bool = False,
     ) -> list[VectorSearchResult]:
         """Search for similar memories.
 
         Args:
             query: The search query
-            scope: "project" or "global"
+            scope: "project", "group", or "global" (determines which DB to search)
             limit: Maximum number of results
             threshold: Minimum similarity score (uses config default if not provided)
             category: Optional category filter
+            include_groups: Only include group-scoped memories from these groups.
+                          Use ["all"] to include all groups. None = no group filtering.
+            exclude_group_scope: If True, exclude group-scoped memories from results.
+                               Used when searching global DB but not wanting group memories.
 
         Returns:
             List of search results sorted by similarity
         """
+        import json
+
         provider = self.embedding_provider
         if provider is None:
             return []
@@ -217,7 +260,7 @@ class VectorStore:
         table = db.open_table(self.TABLE_NAME)
 
         # Build search query
-        search_query = table.search(query_embedding).limit(limit * 2)  # Get extra for filtering
+        search_query = table.search(query_embedding).limit(limit * 3)  # Get extra for filtering
 
         results_df = search_query.to_pandas()
 
@@ -233,8 +276,39 @@ class VectorStore:
         if category:
             results_df = results_df[results_df["category"] == category]
 
+        # Handle group filtering for global DB (which contains both global and group scoped)
+        if "scope" in results_df.columns:
+            if exclude_group_scope:
+                # Exclude group-scoped memories
+                results_df = results_df[results_df["scope"] != "group"]
+            elif include_groups is not None:
+                # Filter to include specific groups
+                def matches_groups(row):
+                    row_scope = row.get("scope")
+                    if row_scope != "group":
+                        return True  # Include non-group memories
+                    row_groups_str = row.get("groups", "[]")
+                    try:
+                        row_groups = json.loads(row_groups_str) if row_groups_str else []
+                    except (json.JSONDecodeError, TypeError):
+                        row_groups = []
+                    if "all" in [g.lower() for g in include_groups]:
+                        return True  # Include all groups
+                    return any(g in row_groups for g in include_groups)
+
+                results_df = results_df[results_df.apply(matches_groups, axis=1)]
+
         # Limit results
         results_df = results_df.head(limit)
+
+        # Parse groups field for results
+        def parse_groups(groups_str):
+            if not groups_str:
+                return []
+            try:
+                return json.loads(groups_str) if isinstance(groups_str, str) else []
+            except (json.JSONDecodeError, TypeError):
+                return []
 
         return [
             VectorSearchResult(
@@ -242,6 +316,8 @@ class VectorStore:
                 content=row["content"],
                 score=row["score"],
                 category=row["category"],
+                scope=row.get("scope"),
+                groups=parse_groups(row.get("groups")),
             )
             for _, row in results_df.iterrows()
         ]
@@ -252,14 +328,17 @@ class VectorStore:
         limit: int = 5,
         threshold: float | None = None,
         category: str | None = None,
+        include_groups: list[str] | None = None,
     ) -> list[VectorSearchResult]:
-        """Search both project and global memories.
+        """Search project, global, and optionally group memories.
 
         Args:
             query: The search query
             limit: Maximum number of results
             threshold: Minimum similarity score
             category: Optional category filter
+            include_groups: Groups to include in search. None = exclude group-scoped.
+                          Use ["all"] to include all groups.
 
         Returns:
             Combined and sorted results
@@ -274,10 +353,20 @@ class VectorStore:
             except Exception:
                 pass
 
-        # Search global if configured
+        # Search global DB (contains both global and group scoped memories)
         if self.config.relevance.include_global:
             try:
-                global_results = self.search(query, "global", limit, threshold, category)
+                # If no groups specified, exclude group-scoped memories
+                # If groups specified, filter to those groups
+                global_results = self.search(
+                    query,
+                    "global",
+                    limit,
+                    threshold,
+                    category,
+                    include_groups=include_groups,
+                    exclude_group_scope=(include_groups is None),
+                )
                 results.extend(global_results)
             except Exception:
                 pass

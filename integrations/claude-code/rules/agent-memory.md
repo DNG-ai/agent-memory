@@ -135,6 +135,28 @@ Before asking the user about something, check if you have relevant memories:
 
 ```bash
 agent-memory search "topic to search for"
+
+# Include group memories in search (works from any directory)
+agent-memory search "pattern" --group=backend-team
+```
+
+## Quick Group Memory Access
+
+View group memories from anywhere (no need to be in a member project):
+
+```bash
+# Quick view of group info + memories
+agent-memory groups backend-team
+
+# All group memories
+agent-memory groups all
+
+# Group-scoped pinned memories only
+agent-memory groups backend-team --pinned
+
+# List group memories directly
+agent-memory list --group=backend-team
+agent-memory list --group=all  # all groups
 ```
 
 ## Full Documentation

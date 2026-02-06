@@ -340,6 +340,55 @@ class MemoryStore:
         """List all pinned memories."""
         return self.list(scope=scope, pinned_only=True, limit=100)
 
+    def list_by_group(
+        self,
+        group_name: str | None = None,
+        pinned_only: bool = False,
+        category: str | None = None,
+        limit: int = 50,
+        include_expired: bool = False,
+    ) -> list[Memory]:
+        """List group-scoped memories, optionally filtered by owner group name.
+
+        Args:
+            group_name: Filter by owner group name. None = all group-scoped memories.
+                       Use "all" to explicitly get all groups.
+            pinned_only: Only return pinned memories.
+            category: Filter by category.
+            limit: Maximum number of results.
+            include_expired: Include expired memories.
+
+        Returns:
+            List of group-scoped memories.
+        """
+        # Group memories are stored in global DB with scope="group"
+        conn = self._get_conn("global")
+
+        query = "SELECT * FROM memories WHERE scope = 'group'"
+        params: list[Any] = []
+
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+
+        if pinned_only:
+            query += " AND pinned = 1"
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = conn.execute(query, params)
+        memories = [Memory.from_row(row) for row in cursor.fetchall()]
+
+        # Filter by group name if specified (groups is a list field)
+        if group_name and group_name.lower() != "all":
+            memories = [m for m in memories if group_name in m.groups]
+
+        if not include_expired:
+            memories = [m for m in memories if not is_expired(m.expires_at)]
+
+        return memories
+
     def search_keyword(
         self,
         query: str,
@@ -359,6 +408,60 @@ class MemoryStore:
         )
         memories = [Memory.from_row(row) for row in cursor.fetchall()]
         return [m for m in memories if not is_expired(m.expires_at)]
+
+    def search_with_groups(
+        self,
+        query: str,
+        include_project: bool = True,
+        include_global: bool = True,
+        include_groups: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[Memory]:
+        """Search memories across multiple scopes including groups.
+
+        Args:
+            query: Search query string.
+            include_project: Include project-scoped memories.
+            include_global: Include global-scoped memories.
+            include_groups: List of group names to include. Use ["all"] for all groups.
+            limit: Maximum results per scope.
+
+        Returns:
+            Combined list of matching memories from all requested scopes.
+        """
+        results: list[Memory] = []
+        seen_ids: set[str] = set()
+
+        def add_unique(memories: list[Memory]) -> None:
+            for m in memories:
+                if m.id not in seen_ids and not is_expired(m.expires_at):
+                    results.append(m)
+                    seen_ids.add(m.id)
+
+        # Search project scope
+        if include_project and self.project_path is not None:
+            add_unique(self.search_keyword(query, "project", limit))
+
+        # Search global scope
+        if include_global:
+            add_unique(self.search_keyword(query, "global", limit))
+
+        # Search group scope
+        if include_groups:
+            group_memories = self.list_by_group(limit=limit * 2)
+            # Filter by query
+            query_lower = query.lower()
+            matching = [m for m in group_memories if query_lower in m.content.lower()]
+
+            # Filter by group names if not "all"
+            if "all" not in [g.lower() for g in include_groups]:
+                matching = [m for m in matching if any(g in m.groups for g in include_groups)]
+
+            add_unique(matching)
+
+        # Sort by created_at descending and limit
+        results.sort(key=lambda m: m.created_at, reverse=True)
+        return results[:limit]
 
     def update(
         self,

@@ -251,6 +251,7 @@ def save(
                     content=content,
                     category=memory.category,
                     scope=scope,
+                    groups=groups,
                 )
             except Exception as e:
                 console.print(f"[yellow]Warning: Could not add to vector store: {e}[/yellow]")
@@ -283,6 +284,11 @@ def save(
     is_flag=True,
     help="Search across all projects (user visibility, not for agents)",
 )
+@click.option(
+    "--group",
+    "group_name",
+    help="Include memories from this group in search (works from any directory)",
+)
 @click.pass_context
 def search(
     ctx: click.Context,
@@ -292,6 +298,7 @@ def search(
     include_global: bool,
     category: str | None,
     all_projects: bool,
+    group_name: str | None,
 ) -> None:
     """Search memories by query."""
     config: Config = ctx.obj["config"]
@@ -315,6 +322,33 @@ def search(
                 results = filtered_results
 
             display_cross_project_memories(results, f"Search Results: '{query}'")
+        return
+
+    # Group search mode - search across project + global + specified group
+    if group_name:
+        with get_store(config) as store:
+            groups = [group_name] if group_name.lower() != "all" else None
+            keyword_results = store.search_with_groups(
+                query=query,
+                include_project=True,
+                include_global=True,
+                include_groups=groups,
+                limit=limit,
+            )
+
+            if category:
+                keyword_results = [m for m in keyword_results if m.category == category]
+
+            if keyword_results:
+                title = f"Search Results: '{query}'"
+                if group_name.lower() != "all":
+                    title += f" (including group '{group_name}')"
+                else:
+                    title += " (including all groups)"
+                console.print(f"\n[bold]{title}[/bold] ({len(keyword_results)} found)")
+                display_memories_table(keyword_results)
+            else:
+                console.print("[dim]No memories found matching your query.[/dim]")
         return
 
     # Standard mode
@@ -384,6 +418,11 @@ def search(
     is_flag=True,
     help="List from all projects (user visibility, not for agents)",
 )
+@click.option(
+    "--group",
+    "group_name",
+    help="List memories owned by a group (use 'all' for all groups). Works from any directory.",
+)
 @click.option("--group-owned", is_flag=True, help="Show only group-scoped memories")
 @click.option("--owned-by", "owned_by_group", help="Show memories owned by a specific group")
 @click.option(
@@ -399,6 +438,7 @@ def list_memories(
     category: str | None,
     limit: int,
     all_projects: bool,
+    group_name: str | None,
     group_owned: bool,
     owned_by_group: str | None,
     include_group_owned: bool,
@@ -439,6 +479,25 @@ def list_memories(
                 title += f" [{category}]"
 
             display_cross_project_memories(results, title)
+        return
+
+    # Group mode - list memories by group name (works from any directory)
+    if group_name:
+        with get_store(config) as store:
+            memories = store.list_by_group(
+                group_name=group_name,
+                pinned_only=pinned,
+                category=category,
+                limit=limit,
+            )
+            title = "Group Memories"
+            if group_name.lower() != "all":
+                title = f"Group '{group_name}' Memories"
+            if pinned:
+                title += " (Pinned)"
+            if category:
+                title += f" [{category}]"
+            display_memories_table(memories, title)
         return
 
     # Standard mode
@@ -944,6 +1003,65 @@ def group_show(ctx: click.Context, name: str) -> None:
     console.print(f"\n[cyan]Projects ({len(grp.projects)}):[/cyan]")
     for proj in grp.projects:
         console.print(f"  - {proj}")
+
+
+# ─────────────────────────────────────────────────────────────
+# GROUPS SHORTHAND COMMAND
+# ─────────────────────────────────────────────────────────────
+@main.command("groups")
+@click.argument("name")
+@click.option("--pinned", is_flag=True, help="Show only pinned memories")
+@click.option("--limit", default=20, help="Maximum memories to show")
+@click.pass_context
+def groups_shorthand(ctx: click.Context, name: str, pinned: bool, limit: int) -> None:
+    """Quick view of a group's info and memories.
+
+    This is a shorthand for viewing a workspace group and its memories.
+    Works from any directory.
+
+    Examples:
+        agent-memory groups backend-team
+        agent-memory groups all --pinned
+    """
+    config: Config = ctx.obj["config"]
+
+    from agent_memory.groups import GroupManager
+
+    # First show group info (if it's a specific group, not "all")
+    if name.lower() != "all":
+        manager = GroupManager(config)
+        grp = manager.get(name)
+
+        if grp is None:
+            console.print(f"[red]Group not found: {name}[/red]")
+            sys.exit(1)
+
+        console.print(f"\n[bold]Group: {grp.name}[/bold]")
+        console.print(f"  Projects: {len(grp.projects)}")
+        for proj in grp.projects:
+            console.print(f"    - [dim]{proj}[/dim]")
+
+    # Then show group memories
+    with get_store(config) as store:
+        memories = store.list_by_group(
+            group_name=name,
+            pinned_only=pinned,
+            limit=limit,
+        )
+
+        title = "\nGroup Memories"
+        if name.lower() != "all":
+            title = f"\nMemories in '{name}'"
+        else:
+            title = "\nAll Group Memories"
+        if pinned:
+            title += " (Pinned only)"
+
+        if memories:
+            console.print(f"[bold]{title}[/bold] ({len(memories)} found)")
+            display_memories_table(memories, "")
+        else:
+            console.print(f"[dim]{title}: No memories found.[/dim]")
 
 
 # ─────────────────────────────────────────────────────────────

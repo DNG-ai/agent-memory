@@ -229,6 +229,7 @@ class SessionManager:
                 content=content,
                 category="session_summary",
                 scope="project",
+                groups=None,
             )
 
         # Update session summary count
