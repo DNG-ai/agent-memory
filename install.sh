@@ -127,25 +127,80 @@ echo ""
 # === Integration Installation Functions ===
 
 install_opencode_integration() {
-    local rules_dir="$HOME/.config/opencode/rules"
-    local skills_dir="$HOME/.config/opencode/skills/agent-memory"
+    local config_dir="$HOME/.config/opencode"
+    local rules_dir="$config_dir/rules"
+    local skills_dir="$config_dir/skills/agent-memory"
+    local config_file="$config_dir/opencode.json"
+    local rules_path="$rules_dir/agent-memory.md"
     
     echo "Installing OpenCode integration..."
     
-    # Install rules (always-loaded core behaviors)
+    # Install rules file
     mkdir -p "$rules_dir"
-    if [ -f "$rules_dir/agent-memory.md" ]; then
+    if [ -f "$rules_path" ]; then
         read -p "  Rules file exists. Overwrite? [y/N] " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            cp "$SCRIPT_DIR/integrations/opencode/rules/agent-memory.md" "$rules_dir/"
-            echo "  Rules installed to $rules_dir/agent-memory.md"
+            cp "$SCRIPT_DIR/integrations/opencode/rules/agent-memory.md" "$rules_path"
+            echo "  Rules installed to $rules_path"
         else
-            echo "  Skipping rules."
+            echo "  Skipping rules file."
         fi
     else
-        cp "$SCRIPT_DIR/integrations/opencode/rules/agent-memory.md" "$rules_dir/"
-        echo "  Rules installed to $rules_dir/agent-memory.md"
+        cp "$SCRIPT_DIR/integrations/opencode/rules/agent-memory.md" "$rules_path"
+        echo "  Rules installed to $rules_path"
+    fi
+    
+    # Configure opencode.json to include the rules via instructions field
+    # OpenCode doesn't auto-load from rules/ dir, so we need to add to instructions
+    mkdir -p "$config_dir"
+    if [ -f "$config_file" ]; then
+        # Check if instructions already contains agent-memory
+        if grep -q "agent-memory.md" "$config_file" 2>/dev/null; then
+            echo "  opencode.json already references agent-memory.md"
+        else
+            echo "  Adding agent-memory to opencode.json instructions..."
+            # Use Python to safely update JSON (preserves existing config)
+            $PYTHON_CMD << PYEOF
+import json
+import os
+
+config_file = "$config_file"
+rules_path = "$rules_path"
+
+try:
+    with open(config_file, 'r') as f:
+        config = json.load(f)
+except (json.JSONDecodeError, FileNotFoundError):
+    config = {}
+
+# Add or update instructions array
+if 'instructions' not in config:
+    config['instructions'] = []
+
+if rules_path not in config['instructions']:
+    config['instructions'].append(rules_path)
+
+# Ensure schema is present
+if '\$schema' not in config:
+    config['\$schema'] = 'https://opencode.ai/config.json'
+
+with open(config_file, 'w') as f:
+    json.dump(config, f, indent=2)
+
+print(f"  Updated {config_file}")
+PYEOF
+        fi
+    else
+        # Create new opencode.json with instructions
+        echo "  Creating opencode.json with instructions..."
+        cat > "$config_file" << JSONEOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "instructions": ["$rules_path"]
+}
+JSONEOF
+        echo "  Created $config_file"
     fi
     
     # Install skill (on-demand full reference)
@@ -165,30 +220,32 @@ install_opencode_integration() {
     fi
     
     echo "  OpenCode integration complete."
-    echo "    - Rules: auto-loaded every session"
+    echo "    - Rules: configured in opencode.json instructions (auto-loaded)"
     echo "    - Skill: load with /skill agent-memory"
 }
 
 install_claude_code_integration() {
-    local rules_dir="$HOME/.claude/rules"
-    local skills_dir="$HOME/.claude/skills/agent-memory"
+    local claude_dir="$HOME/.claude"
+    local rules_dir="$claude_dir/rules"
+    local skills_dir="$claude_dir/skills/agent-memory"
+    local rules_path="$rules_dir/agent-memory.md"
     
     echo "Installing Claude Code integration..."
     
-    # Install rules (always-loaded core behaviors)
+    # Install rules (auto-loaded from ~/.claude/rules/*.md)
     mkdir -p "$rules_dir"
-    if [ -f "$rules_dir/agent-memory.md" ]; then
+    if [ -f "$rules_path" ]; then
         read -p "  Rules file exists. Overwrite? [y/N] " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            cp "$SCRIPT_DIR/integrations/claude-code/rules/agent-memory.md" "$rules_dir/"
-            echo "  Rules installed to $rules_dir/agent-memory.md"
+            cp "$SCRIPT_DIR/integrations/claude-code/rules/agent-memory.md" "$rules_path"
+            echo "  Rules installed to $rules_path"
         else
             echo "  Skipping rules."
         fi
     else
-        cp "$SCRIPT_DIR/integrations/claude-code/rules/agent-memory.md" "$rules_dir/"
-        echo "  Rules installed to $rules_dir/agent-memory.md"
+        cp "$SCRIPT_DIR/integrations/claude-code/rules/agent-memory.md" "$rules_path"
+        echo "  Rules installed to $rules_path"
     fi
     
     # Install skill (on-demand full reference)
@@ -208,7 +265,7 @@ install_claude_code_integration() {
     fi
     
     echo "  Claude Code integration complete."
-    echo "    - Rules: auto-loaded every session"
+    echo "    - Rules: ~/.claude/rules/ (auto-loaded every session)"
     echo "    - Skill: load with /agent-memory"
 }
 
@@ -262,20 +319,24 @@ echo ""
 echo "If you skipped the automatic integration, you can install manually:"
 echo ""
 echo "OpenCode:"
-echo "  # Rules (auto-loaded every session)"
+echo "  # 1. Copy rules file"
 echo "  mkdir -p ~/.config/opencode/rules"
 echo "  cp $SCRIPT_DIR/integrations/opencode/rules/agent-memory.md ~/.config/opencode/rules/"
 echo ""
-echo "  # Skill (on-demand, load with /skill agent-memory)"
+echo "  # 2. Add to opencode.json instructions (REQUIRED - rules/ dir is not auto-loaded)"
+echo "  # Edit ~/.config/opencode/opencode.json and add:"
+echo '  #   "instructions": ["~/.config/opencode/rules/agent-memory.md"]'
+echo ""
+echo "  # 3. Copy skill (on-demand, load with /skill agent-memory)"
 echo "  mkdir -p ~/.config/opencode/skills/agent-memory"
 echo "  cp $SCRIPT_DIR/integrations/opencode/skills/agent-memory/SKILL.md ~/.config/opencode/skills/agent-memory/"
 echo ""
 echo "Claude Code:"
-echo "  # Rules (auto-loaded every session)"
+echo "  # 1. Copy rules (auto-loaded from ~/.claude/rules/)"
 echo "  mkdir -p ~/.claude/rules"
 echo "  cp $SCRIPT_DIR/integrations/claude-code/rules/agent-memory.md ~/.claude/rules/"
 echo ""
-echo "  # Skill (on-demand, load with /agent-memory)"
+echo "  # 2. Copy skill (on-demand, load with /agent-memory)"
 echo "  mkdir -p ~/.claude/skills/agent-memory"
 echo "  cp $SCRIPT_DIR/integrations/claude-code/skills/agent-memory/SKILL.md ~/.claude/skills/agent-memory/"
 echo ""
