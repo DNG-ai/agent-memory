@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_memory.config import Config, get_project_path
+from agent_memory.config import Config, find_descendant_project_paths, get_project_path
 from agent_memory.utils import (
     deserialize_metadata,
     generate_memory_id,
@@ -36,6 +36,8 @@ class Memory:
     expires_at: datetime | None
     source: str  # "user_explicit", "auto_task", "auto_session"
     metadata: dict[str, Any]
+    access_count: int = 0
+    last_accessed_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -52,6 +54,10 @@ class Memory:
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "source": self.source,
             "metadata": self.metadata,
+            "access_count": self.access_count,
+            "last_accessed_at": self.last_accessed_at.isoformat()
+            if self.last_accessed_at
+            else None,
         }
 
     @classmethod
@@ -62,6 +68,10 @@ class Memory:
             groups = deserialize_metadata(row[11]) if row[11] else []
         else:
             groups = []
+
+        # Handle access tracking columns (index 12, 13)
+        access_count = row[12] if len(row) > 12 and row[12] is not None else 0
+        last_accessed_at = parse_timestamp(row[13]) if len(row) > 13 and row[13] else None
 
         return cls(
             id=row[0],
@@ -76,6 +86,8 @@ class Memory:
             expires_at=parse_timestamp(row[8]) if row[8] else None,
             source=row[9],
             metadata=deserialize_metadata(row[10]),
+            access_count=access_count,
+            last_accessed_at=last_accessed_at,
         )
 
 
@@ -147,9 +159,17 @@ class MemoryStore:
                 expires_at TEXT,
                 source TEXT NOT NULL,
                 metadata TEXT DEFAULT '{}',
-                groups TEXT DEFAULT '[]'
+                groups TEXT DEFAULT '[]',
+                access_count INTEGER DEFAULT 0,
+                last_accessed_at TEXT
             )
         """)
+
+        # Run migrations BEFORE creating indexes on new columns
+        self._migrate_groups_column(conn)
+        self._migrate_access_tracking(conn)
+
+        # Create indexes (safe to run after migrations)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)
         """)
@@ -162,9 +182,9 @@ class MemoryStore:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)
         """)
-
-        # Migration: Rename shared_groups to groups and migrate data
-        self._migrate_groups_column(conn)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_access ON memories(access_count)
+        """)
 
         conn.commit()
 
@@ -193,6 +213,57 @@ class MemoryStore:
                 conn.commit()
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+    def _migrate_access_tracking(self, conn: sqlite3.Connection) -> None:
+        """Add access tracking columns if they don't exist."""
+        cursor = conn.execute("PRAGMA table_info(memories)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "access_count" not in columns:
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN access_count INTEGER DEFAULT 0")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        if "last_accessed_at" not in columns:
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN last_accessed_at TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+    def record_access(self, memory_id: str, scope: str = "project") -> None:
+        """Record an access to a memory (increment count, update timestamp)."""
+        conn = self._get_conn(scope)
+        conn.execute(
+            """
+            UPDATE memories 
+            SET access_count = access_count + 1,
+                last_accessed_at = ?
+            WHERE id = ?
+            """,
+            (get_timestamp().isoformat(), memory_id),
+        )
+        conn.commit()
+
+    def record_access_batch(self, memory_ids: list[str], scope: str = "project") -> None:
+        """Record access to multiple memories."""
+        if not memory_ids:
+            return
+        conn = self._get_conn(scope)
+        now = get_timestamp().isoformat()
+        for memory_id in memory_ids:
+            conn.execute(
+                """
+                UPDATE memories 
+                SET access_count = access_count + 1,
+                    last_accessed_at = ?
+                WHERE id = ?
+                """,
+                (now, memory_id),
+            )
+        conn.commit()
 
     def save(
         self,
@@ -849,6 +920,128 @@ class MemoryStore:
     def __exit__(self, *args: Any) -> None:
         """Context manager exit."""
         self.close()
+
+    # ─────────────────────────────────────────────────────────────
+    # DESCENDANT PROJECT METHODS (hierarchical lookup)
+    # ─────────────────────────────────────────────────────────────
+
+    @property
+    def _descendant_db_paths(self) -> list[tuple[Path, Path]]:
+        """Get (original_project_path, db_path) for descendant projects.
+
+        Cached on first access. Only returns descendants that have a memories.db.
+        """
+        if not hasattr(self, "_cached_descendant_db_paths"):
+            if self.project_path is None:
+                self._cached_descendant_db_paths: list[tuple[Path, Path]] = []
+            else:
+                descendants = find_descendant_project_paths(self.config, self.project_path)
+                self._cached_descendant_db_paths = [
+                    (orig, storage / "memories.db")
+                    for orig, storage in descendants
+                    if (storage / "memories.db").exists()
+                ]
+        return self._cached_descendant_db_paths
+
+    def list_with_descendants(
+        self,
+        category: str | None = None,
+        pinned_only: bool = False,
+        limit: int = 50,
+        include_expired: bool = False,
+    ) -> list[Memory]:
+        """List project memories including those from descendant projects.
+
+        Queries the current project DB plus all descendant project DBs,
+        deduplicates by ID, and sorts by created_at DESC.
+
+        Args:
+            category: Filter by category
+            pinned_only: Only return pinned memories
+            limit: Maximum number of results
+            include_expired: Include expired memories
+
+        Returns:
+            Merged, deduplicated list of memories
+        """
+        seen_ids: set[str] = set()
+        all_memories: list[Memory] = []
+
+        # Current project memories first
+        try:
+            current = self.list(
+                scope="project",
+                category=category,
+                pinned_only=pinned_only,
+                limit=limit,
+                include_expired=include_expired,
+            )
+            for m in current:
+                if m.id not in seen_ids:
+                    all_memories.append(m)
+                    seen_ids.add(m.id)
+        except Exception:
+            pass
+
+        # Descendant project memories
+        for _orig_path, db_path in self._descendant_db_paths:
+            descendant_memories = self._query_db_file(
+                db_path,
+                category=category,
+                pinned_only=pinned_only,
+                limit=limit,
+            )
+            for m in descendant_memories:
+                if m.id not in seen_ids:
+                    all_memories.append(m)
+                    seen_ids.add(m.id)
+
+        # Sort by created_at DESC and limit
+        all_memories.sort(key=lambda m: m.created_at, reverse=True)
+        return all_memories[:limit]
+
+    def search_with_descendants(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> list[Memory]:
+        """Search project memories including descendant projects by keyword.
+
+        Args:
+            query: Search query string
+            limit: Maximum number of results
+
+        Returns:
+            Merged, deduplicated list of matching memories
+        """
+        seen_ids: set[str] = set()
+        all_memories: list[Memory] = []
+
+        # Current project
+        try:
+            current = self.search_keyword(query, "project", limit)
+            for m in current:
+                if m.id not in seen_ids:
+                    all_memories.append(m)
+                    seen_ids.add(m.id)
+        except Exception:
+            pass
+
+        # Descendant projects
+        for _orig_path, db_path in self._descendant_db_paths:
+            descendant_memories = self._search_db_file(
+                db_path,
+                query=query,
+                limit=limit,
+            )
+            for m in descendant_memories:
+                if m.id not in seen_ids:
+                    all_memories.append(m)
+                    seen_ids.add(m.id)
+
+        # Sort by created_at DESC and limit
+        all_memories.sort(key=lambda m: m.created_at, reverse=True)
+        return all_memories[:limit]
 
     # ─────────────────────────────────────────────────────────────
     # CROSS-PROJECT METHODS (for user visibility, not agents)

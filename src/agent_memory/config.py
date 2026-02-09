@@ -25,6 +25,16 @@ DEFAULT_CONFIG = {
             "model": "claude-3-haiku-20240307",
         },
     },
+    "llm": {
+        # LLM for summarization (compaction). Reuses semantic provider credentials.
+        "model": "gemini-2.0-flash",  # Default model for summarization
+        "vertex": {
+            "model": "gemini-2.0-flash",
+        },
+        "claude": {
+            "model": "claude-3-haiku-20240307",
+        },
+    },
     "autosave": {
         "enabled": True,
         "on_task_complete": True,
@@ -104,6 +114,18 @@ class RelevanceConfig:
 
 
 @dataclass
+class LLMConfig:
+    """LLM configuration for summarization (compaction).
+
+    Reuses the same provider as semantic search but with a different model.
+    """
+
+    model: str = "gemini-2.0-flash"
+    vertex_model: str = "gemini-2.0-flash"
+    claude_model: str = "claude-3-haiku-20240307"
+
+
+@dataclass
 class Config:
     """Main configuration object."""
 
@@ -113,6 +135,7 @@ class Config:
     startup: StartupConfig
     expiration: ExpirationConfig
     relevance: RelevanceConfig
+    llm: LLMConfig
 
     @property
     def global_path(self) -> Path:
@@ -220,6 +243,13 @@ def _build_config(base_path: Path, data: dict[str, Any]) -> Config:
         include_global=relevance_data.get("include_global", True),
     )
 
+    llm_data = data.get("llm", {})
+    llm = LLMConfig(
+        model=llm_data.get("model", "gemini-2.0-flash"),
+        vertex_model=llm_data.get("vertex", {}).get("model", "gemini-2.0-flash"),
+        claude_model=llm_data.get("claude", {}).get("model", "claude-3-haiku-20240307"),
+    )
+
     return Config(
         base_path=base_path,
         semantic=semantic,
@@ -227,6 +257,7 @@ def _build_config(base_path: Path, data: dict[str, Any]) -> Config:
         startup=startup,
         expiration=expiration,
         relevance=relevance,
+        llm=llm,
     )
 
 
@@ -295,3 +326,63 @@ def resolve_project_from_hash(config: Config, project_hash: str) -> Path | None:
     if ref_file.exists():
         return Path(ref_file.read_text().strip())
     return None
+
+
+def find_descendant_project_paths(
+    config: Config,
+    parent_dir: Path,
+    max_results: int = 20,
+) -> list[tuple[Path, Path]]:
+    """Find stored projects that are strict descendants of parent_dir.
+
+    Scans ~/.agent-memory/projects/, reads each .project_path ref file, and
+    returns those whose original path is a strict child of parent_dir.
+
+    Args:
+        config: Configuration object
+        parent_dir: The parent directory to search descendants for
+        max_results: Maximum number of results to return
+
+    Returns:
+        List of (original_project_path, storage_path) tuples
+    """
+    parent_resolved = parent_dir.resolve()
+
+    # Safety: skip if parent has <= 2 path components (e.g. "/" or "/Users")
+    if len(parent_resolved.parts) <= 2:
+        return []
+
+    projects_dir = config.projects_path
+    if not projects_dir.exists():
+        return []
+
+    results: list[tuple[Path, Path]] = []
+
+    for project_dir in projects_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+
+        ref_file = project_dir / ".project_path"
+        if not ref_file.exists():
+            continue
+
+        try:
+            original_path = Path(ref_file.read_text().strip())
+        except Exception:
+            continue
+
+        # Must be a strict descendant (not equal to parent)
+        try:
+            original_path.relative_to(parent_resolved)
+        except ValueError:
+            continue
+
+        if original_path == parent_resolved:
+            continue
+
+        results.append((original_path, project_dir))
+
+        if len(results) >= max_results:
+            break
+
+    return results

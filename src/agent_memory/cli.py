@@ -289,6 +289,11 @@ def save(
     "group_name",
     help="Include memories from this group in search (works from any directory)",
 )
+@click.option(
+    "--exact",
+    is_flag=True,
+    help="Only search the exact current project (no descendant lookup)",
+)
 @click.pass_context
 def search(
     ctx: click.Context,
@@ -299,8 +304,13 @@ def search(
     category: str | None,
     all_projects: bool,
     group_name: str | None,
+    exact: bool,
 ) -> None:
-    """Search memories by query."""
+    """Search memories by query.
+
+    By default, includes memories from descendant projects (hierarchical lookup).
+    Use --exact to only search the current project directory.
+    """
     config: Config = ctx.obj["config"]
 
     # Cross-project mode (for users, not agents)
@@ -366,6 +376,7 @@ def search(
                 limit=limit,
                 threshold=threshold,
                 category=category,
+                include_descendants=not exact,
             )
 
             if results:
@@ -382,7 +393,10 @@ def search(
 
     # Keyword fallback
     with get_store(config, project_path) as store:
-        keyword_results = store.search_keyword(query, "project", limit)
+        if exact:
+            keyword_results = store.search_keyword(query, "project", limit)
+        else:
+            keyword_results = store.search_with_descendants(query, limit)
 
         if include_global:
             keyword_results.extend(store.search_keyword(query, "global", limit))
@@ -390,7 +404,14 @@ def search(
         if category:
             keyword_results = [m for m in keyword_results if m.category == category]
 
-        keyword_results = keyword_results[:limit]
+        # Deduplicate
+        seen_ids: set[str] = set()
+        unique_results: list[Memory] = []
+        for m in keyword_results:
+            if m.id not in seen_ids:
+                unique_results.append(m)
+                seen_ids.add(m.id)
+        keyword_results = unique_results[:limit]
 
         if keyword_results:
             results_found = True
@@ -430,6 +451,11 @@ def search(
     is_flag=True,
     help="With --global, also include group-scoped memories",
 )
+@click.option(
+    "--exact",
+    is_flag=True,
+    help="Only show memories from the exact current project (no descendant lookup)",
+)
 @click.pass_context
 def list_memories(
     ctx: click.Context,
@@ -442,8 +468,13 @@ def list_memories(
     group_owned: bool,
     owned_by_group: str | None,
     include_group_owned: bool,
+    exact: bool,
 ) -> None:
-    """List memories."""
+    """List memories.
+
+    By default, includes memories from descendant projects (hierarchical lookup).
+    Use --exact to only list memories from the current project directory.
+    """
     config: Config = ctx.obj["config"]
 
     # Cross-project mode (for users, not agents)
@@ -521,9 +552,17 @@ def list_memories(
                     limit=limit,
                 )
                 memories.extend(group_memories)
-        else:
+        elif exact:
+            # Exact mode: only current project
             memories = store.list(
                 scope="project",
+                category=category,
+                pinned_only=pinned,
+                limit=limit,
+            )
+        else:
+            # Default: include descendant projects
+            memories = store.list_with_descendants(
                 category=category,
                 pinned_only=pinned,
                 limit=limit,
@@ -1544,6 +1583,454 @@ def startup(
                     console.print(
                         "  Summaries available. Load with: agent-memory session load --last"
                     )
+
+
+# ─────────────────────────────────────────────────────────────
+# STATS COMMAND
+# ─────────────────────────────────────────────────────────────
+@main.command()
+@click.option(
+    "--scope",
+    type=click.Choice(["project", "group", "global"]),
+    help="Filter by scope",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def stats(ctx: click.Context, scope: str | None, as_json: bool) -> None:
+    """Show memory statistics and recommendations."""
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    from datetime import timedelta
+
+    from agent_memory.utils import get_timestamp
+
+    now = get_timestamp()
+
+    with get_store(config, project_path) as store:
+        # Gather all memories
+        all_memories: list[Memory] = []
+        scopes_to_check = [scope] if scope else ["project", "group", "global"]
+
+        for check_scope in scopes_to_check:
+            try:
+                memories = store.list(
+                    scope=check_scope,
+                    pinned_only=False,
+                    limit=100000,
+                )
+                all_memories.extend(memories)
+            except Exception:
+                continue
+
+        if not all_memories:
+            if as_json:
+                console.print(json.dumps({"error": "No memories found"}))
+            else:
+                console.print("[dim]No memories found.[/dim]")
+            return
+
+        # Calculate statistics
+        total_count = len(all_memories)
+        pinned_count = sum(1 for m in all_memories if m.pinned)
+
+        # Estimate size (rough: content length in bytes)
+        size_bytes = sum(len(m.content.encode("utf-8")) for m in all_memories)
+
+        # By scope
+        by_scope: dict[str, dict[str, int]] = {}
+        for m in all_memories:
+            if m.scope not in by_scope:
+                by_scope[m.scope] = {"count": 0, "pinned": 0}
+            by_scope[m.scope]["count"] += 1
+            if m.pinned:
+                by_scope[m.scope]["pinned"] += 1
+
+        # By category
+        by_category: dict[str, int] = {}
+        for m in all_memories:
+            by_category[m.category] = by_category.get(m.category, 0) + 1
+
+        # By age
+        by_age = {"lt_7d": 0, "7d_30d": 0, "30d_90d": 0, "gt_90d": 0}
+        for m in all_memories:
+            age = now - m.created_at
+            if age < timedelta(days=7):
+                by_age["lt_7d"] += 1
+            elif age < timedelta(days=30):
+                by_age["7d_30d"] += 1
+            elif age < timedelta(days=90):
+                by_age["30d_90d"] += 1
+            else:
+                by_age["gt_90d"] += 1
+
+        # Access patterns
+        access_patterns = {"never_accessed": 0, "accessed_1_5": 0, "accessed_gt_5": 0}
+        for m in all_memories:
+            if m.access_count == 0:
+                access_patterns["never_accessed"] += 1
+            elif m.access_count <= 5:
+                access_patterns["accessed_1_5"] += 1
+            else:
+                access_patterns["accessed_gt_5"] += 1
+
+        # Generate recommendations
+        recommendations: list[dict[str, Any]] = []
+
+        # Recommend pruning old, never-accessed memories
+        old_never_accessed = sum(
+            1
+            for m in all_memories
+            if m.access_count == 0 and (now - m.created_at) >= timedelta(days=90) and not m.pinned
+        )
+        if old_never_accessed > 0:
+            recommendations.append(
+                {
+                    "type": "prune",
+                    "count": old_never_accessed,
+                    "reason": "Memories older than 90 days that have never been accessed",
+                }
+            )
+
+        # Recommend compaction for session_summary category
+        session_summaries = sum(1 for m in all_memories if m.category == "session_summary")
+        if session_summaries > 10:
+            recommendations.append(
+                {
+                    "type": "compact",
+                    "count": session_summaries,
+                    "reason": "Session summaries could be consolidated into fewer entries",
+                }
+            )
+
+        # Build result
+        result = {
+            "totals": {
+                "count": total_count,
+                "pinned": pinned_count,
+                "size_bytes": size_bytes,
+            },
+            "by_scope": by_scope,
+            "by_category": by_category,
+            "by_age": by_age,
+            "access_patterns": access_patterns,
+            "recommendations": recommendations,
+        }
+
+        if as_json:
+            console.print(json.dumps(result, indent=2))
+        else:
+            console.print("\n[bold]Memory Statistics[/bold]\n")
+
+            console.print("[cyan]Totals[/cyan]")
+            console.print(f"  Total memories: {total_count}")
+            console.print(f"  Pinned: {pinned_count}")
+            console.print(f"  Estimated size: {size_bytes:,} bytes")
+
+            console.print("\n[cyan]By Scope[/cyan]")
+            for s, counts in by_scope.items():
+                console.print(f"  {s}: {counts['count']} ({counts['pinned']} pinned)")
+
+            console.print("\n[cyan]By Category[/cyan]")
+            for cat, count in sorted(by_category.items()):
+                console.print(f"  {cat}: {count}")
+
+            console.print("\n[cyan]By Age[/cyan]")
+            console.print(f"  < 7 days: {by_age['lt_7d']}")
+            console.print(f"  7-30 days: {by_age['7d_30d']}")
+            console.print(f"  30-90 days: {by_age['30d_90d']}")
+            console.print(f"  > 90 days: {by_age['gt_90d']}")
+
+            console.print("\n[cyan]Access Patterns[/cyan]")
+            console.print(f"  Never accessed: {access_patterns['never_accessed']}")
+            console.print(f"  Accessed 1-5 times: {access_patterns['accessed_1_5']}")
+            console.print(f"  Accessed >5 times: {access_patterns['accessed_gt_5']}")
+
+            if recommendations:
+                console.print("\n[yellow]Recommendations[/yellow]")
+                for rec in recommendations:
+                    console.print(f"  [{rec['type']}] {rec['count']} memories: {rec['reason']}")
+
+
+# ─────────────────────────────────────────────────────────────
+# PRUNE COMMAND
+# ─────────────────────────────────────────────────────────────
+@main.command()
+@click.option("--older-than", help="Prune memories older than (e.g., 90d)")
+@click.option("--never-accessed", is_flag=True, help="Prune memories never accessed")
+@click.option(
+    "--category",
+    type=click.Choice(["factual", "decision", "task_history", "session_summary"]),
+    help="Filter by category",
+)
+@click.option(
+    "--scope",
+    type=click.Choice(["project", "group", "global"]),
+    help="Filter by scope",
+)
+@click.option("--include-pinned", is_flag=True, help="Include pinned memories (dangerous)")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted without deleting")
+@click.option("--confirm", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def prune(
+    ctx: click.Context,
+    older_than: str | None,
+    never_accessed: bool,
+    category: str | None,
+    scope: str | None,
+    include_pinned: bool,
+    dry_run: bool,
+    confirm: bool,
+) -> None:
+    """Remove old or unused memories.
+
+    Examples:
+        agent-memory prune --older-than=90d --dry-run
+        agent-memory prune --never-accessed --older-than=30d
+        agent-memory prune --category=session_summary --older-than=60d
+    """
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    if not older_than and not never_accessed:
+        console.print("[red]Specify at least one of: --older-than, --never-accessed[/red]")
+        sys.exit(1)
+
+    # Parse older_than
+    older_than_days: int | None = None
+    if older_than:
+        if older_than.endswith("d"):
+            try:
+                older_than_days = int(older_than[:-1])
+            except ValueError:
+                console.print(f"[red]Invalid --older-than format: {older_than}[/red]")
+                sys.exit(1)
+        else:
+            console.print("[red]--older-than must end with 'd' (e.g., 90d)[/red]")
+            sys.exit(1)
+
+    from agent_memory.pruning import PruningEngine
+
+    with get_store(config, project_path) as store:
+        vector_store = get_vector_store(config, project_path)
+        engine = PruningEngine(config, store, vector_store)
+
+        # Find candidates
+        candidates = engine.find_candidates(
+            scope=scope,
+            older_than_days=older_than_days,
+            never_accessed=never_accessed,
+            category=category,
+            exclude_pinned=not include_pinned,
+        )
+
+        if not candidates:
+            console.print("[dim]No memories match the prune criteria.[/dim]")
+            return
+
+        # Show summary
+        summary = engine.get_prune_summary(candidates)
+
+        console.print(f"\n[bold]Prune Candidates[/bold]: {summary['total']} memories\n")
+
+        console.print("[cyan]By Scope[/cyan]")
+        for s, count in summary["by_scope"].items():
+            console.print(f"  {s}: {count}")
+
+        console.print("\n[cyan]By Category[/cyan]")
+        for cat, count in summary["by_category"].items():
+            console.print(f"  {cat}: {count}")
+
+        console.print("\n[cyan]By Reason[/cyan]")
+        for reason, count in summary["by_reason"].items():
+            console.print(f"  {reason}: {count}")
+
+        # Show preview
+        console.print("\n[cyan]Preview (first 10)[/cyan]")
+        for i, candidate in enumerate(candidates[:10]):
+            m = candidate.memory
+            reasons = ", ".join(candidate.reasons)
+            console.print(f"  {m.id}: {truncate_text(m.content, 40)} [{reasons}]")
+        if len(candidates) > 10:
+            console.print(f"  ... and {len(candidates) - 10} more")
+
+        if dry_run:
+            console.print("\n[yellow]Dry run - no memories deleted.[/yellow]")
+            return
+
+        # Confirm
+        if not confirm:
+            if not click.confirm(f"\nDelete {len(candidates)} memories?"):
+                console.print("[dim]Cancelled.[/dim]")
+                return
+
+        # Execute prune
+        deleted = engine.prune(candidates)
+        console.print(f"\n[green]Deleted {deleted} memories.[/green]")
+
+
+# ─────────────────────────────────────────────────────────────
+# COMPACT COMMAND
+# ─────────────────────────────────────────────────────────────
+@main.command()
+@click.option(
+    "--category",
+    type=click.Choice(["factual", "decision", "task_history", "session_summary"]),
+    help="Filter by category",
+)
+@click.option("--older-than", help="Only memories older than (e.g., 30d)")
+@click.option(
+    "--scope",
+    type=click.Choice(["project", "group", "global"]),
+    help="Filter source memories by scope",
+)
+@click.option("--similarity", type=float, default=0.8, help="Similarity threshold (0.0-1.0)")
+@click.option("--min-cluster", type=int, default=3, help="Minimum memories per cluster")
+@click.option(
+    "--target-scope",
+    type=click.Choice(["project", "group", "global"]),
+    required=True,
+    help="Scope for compacted memories",
+)
+@click.option("--target-groups", help="Groups for compacted memories (if target-scope=group)")
+@click.option("--dry-run", is_flag=True, help="Show clusters without compacting")
+@click.option("--confirm", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def compact(
+    ctx: click.Context,
+    category: str | None,
+    older_than: str | None,
+    scope: str | None,
+    similarity: float,
+    min_cluster: int,
+    target_scope: str,
+    target_groups: str | None,
+    dry_run: bool,
+    confirm: bool,
+) -> None:
+    """Compact similar memories into summaries using LLM.
+
+    Uses DBSCAN clustering to find similar memories and summarizes them.
+    The original memories are deleted and replaced with a single summary.
+
+    Examples:
+        agent-memory compact --category=session_summary --target-scope=project --dry-run
+        agent-memory compact --older-than=30d --similarity=0.85 --target-scope=global
+    """
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    # Validate target-groups
+    if target_scope == "group" and not target_groups:
+        console.print("[red]--target-groups required when --target-scope=group[/red]")
+        sys.exit(1)
+
+    groups_list = [g.strip() for g in target_groups.split(",")] if target_groups else None
+
+    # Parse older_than
+    older_than_days: int | None = None
+    if older_than:
+        if older_than.endswith("d"):
+            try:
+                older_than_days = int(older_than[:-1])
+            except ValueError:
+                console.print(f"[red]Invalid --older-than format: {older_than}[/red]")
+                sys.exit(1)
+        else:
+            console.print("[red]--older-than must end with 'd' (e.g., 30d)[/red]")
+            sys.exit(1)
+
+    from agent_memory.compaction import CompactionEngine
+
+    with get_store(config, project_path) as store:
+        vector_store = get_vector_store(config, project_path)
+
+        if not vector_store:
+            console.print("[red]Compaction requires semantic search to be enabled.[/red]")
+            console.print("Enable it with: agent-memory config set semantic.enabled=true")
+            sys.exit(1)
+
+        engine = CompactionEngine(config, store, vector_store)
+
+        # Find clusters
+        try:
+            clusters = engine.find_clusters(
+                scope=scope,
+                category=category,
+                older_than_days=older_than_days,
+                similarity_threshold=similarity,
+                min_cluster_size=min_cluster,
+            )
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+
+        if not clusters:
+            console.print("[dim]No clusters found matching criteria.[/dim]")
+            return
+
+        # Show cluster summary
+        summary = engine.get_cluster_summary(clusters)
+
+        console.print(f"\n[bold]Found {summary['cluster_count']} clusters[/bold]")
+        console.print(f"Total memories: {summary['total_memories']}")
+        console.print(f"Avg cluster size: {summary['avg_cluster_size']}")
+
+        console.print("\n[cyan]Cluster Details[/cyan]")
+        for cluster_info in summary["clusters"]:
+            console.print(
+                f"\n  Cluster {cluster_info['index'] + 1} ({cluster_info['size']} memories):"
+            )
+            for preview in cluster_info["previews"][:3]:
+                console.print(f"    - {preview['id']}: {preview['content']}")
+            if len(cluster_info["previews"]) > 3:
+                console.print(f"    ... and {len(cluster_info['previews']) - 3} more")
+
+        if dry_run:
+            console.print("\n[yellow]Dry run - no compaction performed.[/yellow]")
+            return
+
+        # Confirm
+        if not confirm:
+            if not click.confirm(
+                f"\nCompact {summary['total_memories']} memories into "
+                f"{summary['cluster_count']} summaries?"
+            ):
+                console.print("[dim]Cancelled.[/dim]")
+                return
+
+        # Execute compaction
+        console.print("\n[cyan]Compacting clusters...[/cyan]")
+        compacted_count = 0
+
+        for i, cluster in enumerate(clusters):
+            console.print(f"  Processing cluster {i + 1}/{len(clusters)}...")
+
+            try:
+                # Generate summary (may raise on LLM error)
+                summary_text = engine.generate_summary(cluster)
+
+                # Compact cluster
+                new_memory = engine.compact_cluster(
+                    cluster=cluster,
+                    summary=summary_text,
+                    target_scope=target_scope,
+                    target_groups=groups_list,
+                )
+
+                console.print(f"    Created: {new_memory.id} (from {cluster.size} memories)")
+                compacted_count += cluster.size
+
+            except Exception as e:
+                console.print(f"\n[red]LLM error during compaction: {e}[/red]")
+                console.print(
+                    "[red]Aborting compaction. Some clusters may have been processed.[/red]"
+                )
+                sys.exit(1)
+
+        console.print(
+            f"\n[green]Compacted {compacted_count} memories into {len(clusters)} summaries.[/green]"
+        )
 
 
 if __name__ == "__main__":

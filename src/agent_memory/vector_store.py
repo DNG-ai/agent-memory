@@ -11,7 +11,7 @@ import pyarrow as pa
 if TYPE_CHECKING:
     import lancedb
 
-from agent_memory.config import Config, get_project_path
+from agent_memory.config import Config, find_descendant_project_paths, get_project_path
 from agent_memory.embeddings.base import EmbeddingProvider, get_embedding_provider
 
 
@@ -342,6 +342,100 @@ class VectorStore:
             for _, row in results_df.iterrows()
         ]
 
+    @property
+    def _descendant_vector_paths(self) -> list[tuple[Path, Path]]:
+        """Get (original_project_path, vector_dir) for descendant projects.
+
+        Cached on first access. Only returns descendants that have a vectors directory.
+        """
+        if not hasattr(self, "_cached_descendant_vector_paths"):
+            if self.project_path is None:
+                self._cached_descendant_vector_paths: list[tuple[Path, Path]] = []
+            else:
+                descendants = find_descendant_project_paths(self.config, self.project_path)
+                self._cached_descendant_vector_paths = [
+                    (orig, storage / "vectors")
+                    for orig, storage in descendants
+                    if (storage / "vectors").exists()
+                ]
+        return self._cached_descendant_vector_paths
+
+    def search_descendants(
+        self,
+        query: str,
+        limit: int = 5,
+        threshold: float | None = None,
+        category: str | None = None,
+    ) -> list[VectorSearchResult]:
+        """Search descendant project vector stores.
+
+        Embeds query once and searches each descendant's LanceDB, merging by score.
+
+        Args:
+            query: The search query
+            limit: Maximum number of results
+            threshold: Minimum similarity score
+            category: Optional category filter
+
+        Returns:
+            Merged results sorted by score
+        """
+        import json
+
+        import lancedb
+
+        provider = self.embedding_provider
+        if provider is None:
+            return []
+
+        if threshold is None:
+            threshold = self.config.semantic.threshold
+
+        query_embedding = provider.embed(query)
+        results: list[VectorSearchResult] = []
+
+        for _orig_path, vector_dir in self._descendant_vector_paths:
+            try:
+                db = lancedb.connect(str(vector_dir))
+                if self.TABLE_NAME not in db.table_names():
+                    continue
+
+                table = db.open_table(self.TABLE_NAME)
+                search_query = table.search(query_embedding).limit(limit * 2)
+                results_df = search_query.to_pandas()
+
+                if results_df.empty:
+                    continue
+
+                results_df["score"] = 1 - results_df["_distance"]
+                results_df = results_df[results_df["score"] >= threshold]
+
+                if category:
+                    results_df = results_df[results_df["category"] == category]
+
+                for _, row in results_df.iterrows():
+                    groups_str = row.get("groups", "[]")
+                    try:
+                        groups = json.loads(groups_str) if isinstance(groups_str, str) else []
+                    except (json.JSONDecodeError, TypeError):
+                        groups = []
+
+                    results.append(
+                        VectorSearchResult(
+                            memory_id=row["memory_id"],
+                            content=row["content"],
+                            score=row["score"],
+                            category=row["category"],
+                            scope=row.get("scope"),
+                            groups=groups,
+                        )
+                    )
+            except Exception:
+                continue
+
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:limit]
+
     def search_combined(
         self,
         query: str,
@@ -349,8 +443,9 @@ class VectorStore:
         threshold: float | None = None,
         category: str | None = None,
         include_groups: list[str] | None = None,
+        include_descendants: bool = True,
     ) -> list[VectorSearchResult]:
-        """Search project, global, and optionally group memories.
+        """Search project, global, descendant, and optionally group memories.
 
         Args:
             query: The search query
@@ -359,17 +454,35 @@ class VectorStore:
             category: Optional category filter
             include_groups: Groups to include in search. None = exclude group-scoped.
                           Use ["all"] to include all groups.
+            include_descendants: Whether to include descendant project memories
 
         Returns:
             Combined and sorted results
         """
         results = []
+        seen_ids: set[str] = set()
+
+        def add_unique(new_results: list[VectorSearchResult]) -> None:
+            for r in new_results:
+                if r.memory_id not in seen_ids:
+                    results.append(r)
+                    seen_ids.add(r.memory_id)
 
         # Search project if available
         if self.project_path is not None:
             try:
                 project_results = self.search(query, "project", limit, threshold, category)
-                results.extend(project_results)
+                add_unique(project_results)
+            except Exception:
+                pass
+
+        # Search descendant projects
+        if include_descendants:
+            try:
+                descendant_results = self.search_descendants(
+                    query, limit, threshold, category
+                )
+                add_unique(descendant_results)
             except Exception:
                 pass
 
@@ -387,7 +500,7 @@ class VectorStore:
                     include_groups=include_groups,
                     exclude_group_scope=(include_groups is None),
                 )
-                results.extend(global_results)
+                add_unique(global_results)
             except Exception:
                 pass
 

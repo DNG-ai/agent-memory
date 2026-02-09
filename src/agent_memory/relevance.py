@@ -98,9 +98,11 @@ class RelevanceEngine:
         """
         pinned_memories = []
 
-        # Get pinned project memories
+        # Get pinned project memories (including descendant projects)
         try:
-            pinned_memories.extend(self.store.list_pinned("project"))
+            pinned_memories.extend(
+                self.store.list_with_descendants(pinned_only=True, limit=100)
+            )
         except Exception:
             pass
 
@@ -132,8 +134,7 @@ class RelevanceEngine:
             now = get_timestamp()
             recent_cutoff = now - timedelta(days=7)
 
-            summaries = self.store.list(
-                scope="project",
+            summaries = self.store.list_with_descendants(
                 category="session_summary",
                 limit=10,
             )
@@ -263,7 +264,7 @@ class RelevanceEngine:
             # Try keyword search
             remaining = limit - len(semantic_results)
             try:
-                keyword_results = self.store.search_keyword(query, "project", remaining)
+                keyword_results = self.store.search_with_descendants(query, remaining)
                 # Exclude memories already in semantic results
                 semantic_ids = {r.memory_id for r in semantic_results}
                 keyword_results = [m for m in keyword_results if m.id not in semantic_ids]
@@ -287,11 +288,11 @@ class RelevanceEngine:
                 except Exception:
                     pass
 
-        # Get pinned memories
+        # Get pinned memories (including descendant projects)
         pinned: list[Memory] = []
         if include_pinned:
             try:
-                pinned = self.store.list_pinned("project")
+                pinned = self.store.list_with_descendants(pinned_only=True, limit=100)
                 pinned.extend(self.store.list_pinned("global"))
             except Exception:
                 pass
