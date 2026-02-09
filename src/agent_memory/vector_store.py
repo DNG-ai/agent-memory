@@ -91,19 +91,9 @@ class VectorStore:
                 self._project_db = lancedb.connect(str(self.project_db_path))
             return self._project_db
 
-    def _get_or_create_table(self, db: lancedb.DBConnection, dimension: int) -> Any:
-        """Get or create the vectors table.
-
-        Schema includes scope and groups fields for filtering group-scoped memories.
-        """
-        if self.TABLE_NAME in db.table_names():
-            table = db.open_table(self.TABLE_NAME)
-            # Check if migration needed (old schema without scope/groups)
-            self._migrate_table_schema(table, dimension)
-            return table
-
-        # Create schema with scope and groups for filtering
-        schema = pa.schema(
+    def _new_schema(self, dimension: int) -> pa.Schema:
+        """Build the current table schema."""
+        return pa.schema(
             [
                 pa.field("memory_id", pa.string()),
                 pa.field("content", pa.string()),
@@ -114,17 +104,47 @@ class VectorStore:
             ]
         )
 
-        return db.create_table(self.TABLE_NAME, schema=schema)
+    def _get_or_create_table(self, db: lancedb.DBConnection, dimension: int) -> Any:
+        """Get or create the vectors table.
 
-    def _migrate_table_schema(self, table: Any, dimension: int) -> None:
-        """Migrate old table schema to include scope and groups fields.
-
-        LanceDB doesn't support ALTER TABLE, so we check if columns exist
-        and add default values when inserting if they're missing.
+        Schema includes scope and groups fields for filtering group-scoped memories.
         """
-        # LanceDB tables are schemaless for new columns - they'll be added on insert
-        # We just note that old records may have None for scope/groups
-        pass
+        if self.TABLE_NAME in db.table_names():
+            table = db.open_table(self.TABLE_NAME)
+            field_names = [f.name for f in table.schema]
+            if "scope" not in field_names or "groups" not in field_names:
+                return self._migrate_table(db, table, dimension)
+            return table
+
+        return db.create_table(self.TABLE_NAME, schema=self._new_schema(dimension))
+
+    def _migrate_table(self, db: lancedb.DBConnection, table: Any, dimension: int) -> Any:
+        """Migrate old table to include scope and groups fields.
+
+        LanceDB doesn't support ALTER TABLE, so we recreate the table
+        with the new schema, preserving existing data.
+        """
+        df = table.to_pandas()
+
+        # Add missing columns with defaults
+        if "scope" not in df.columns:
+            df["scope"] = "project"
+        if "groups" not in df.columns:
+            df["groups"] = "[]"
+
+        db.drop_table(self.TABLE_NAME)
+        new_table = db.create_table(self.TABLE_NAME, schema=self._new_schema(dimension))
+
+        if not df.empty:
+            records = df[["memory_id", "content", "category", "scope", "groups", "vector"]].to_dict(
+                orient="records"
+            )
+            for r in records:
+                if hasattr(r["vector"], "tolist"):
+                    r["vector"] = r["vector"].tolist()
+            new_table.add(records)
+
+        return new_table
 
     def add(
         self,
