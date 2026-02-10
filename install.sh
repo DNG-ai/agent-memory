@@ -269,6 +269,69 @@ install_claude_code_integration() {
     echo "    - Skill: load with /agent-memory"
 }
 
+install_claude_code_hooks() {
+    local claude_dir="$HOME/.claude"
+    local settings_file="$claude_dir/settings.local.json"
+
+    echo "  Installing Claude Code hooks..."
+    mkdir -p "$claude_dir"
+
+    # Merge hook config into settings.local.json
+    $PYTHON_CMD << PYEOF
+import json
+import os
+
+settings_file = "$settings_file"
+
+try:
+    with open(settings_file, 'r') as f:
+        settings = json.load(f)
+except (json.JSONDecodeError, FileNotFoundError):
+    settings = {}
+
+# Ensure hooks structure exists
+if 'hooks' not in settings:
+    settings['hooks'] = {}
+if 'PostToolUse' not in settings['hooks']:
+    settings['hooks']['PostToolUse'] = []
+
+# Check if agent-memory hook already exists
+hook_exists = any(
+    isinstance(h, dict) and any(
+        isinstance(hk, dict) and hk.get('command', '').startswith('agent-memory hook')
+        for hk in h.get('hooks', [])
+    )
+    for h in settings['hooks']['PostToolUse']
+)
+
+if not hook_exists:
+    settings['hooks']['PostToolUse'].append({
+        "matcher": "Bash",
+        "hooks": [
+            {
+                "type": "command",
+                "command": "agent-memory hook check-error"
+            }
+        ]
+    })
+    with open(settings_file, 'w') as f:
+        json.dump(settings, f, indent=2)
+    print("    Hooks added to " + settings_file)
+else:
+    print("    Hooks already configured in " + settings_file)
+PYEOF
+}
+
+install_opencode_hooks() {
+    local plugins_dir="$HOME/.config/opencode/plugins"
+    local plugin_file="$plugins_dir/agent-memory-hook.mjs"
+
+    echo "  Installing OpenCode hooks..."
+    mkdir -p "$plugins_dir"
+    cp "$SCRIPT_DIR/integrations/opencode/hooks/agent-memory-hook.mjs" "$plugin_file"
+    echo "    Plugin installed to $plugin_file"
+}
+
 # === Agent Integrations ===
 
 if [ "$SKIP_INTEGRATIONS" = false ]; then
@@ -306,6 +369,37 @@ if [ "$SKIP_INTEGRATIONS" = false ]; then
                 ;;
         esac
     fi
+    # === Error-Detection Hooks ===
+    echo ""
+    echo "Error-Detection Hooks"
+    echo "---------------------"
+    echo "These detect errors in command output and remind the agent to save fix patterns."
+    echo "You can enable/disable later with: agent-memory config set hooks.error_nudge=true/false"
+    echo ""
+    read -p "Would you like to install error-detection hooks? [y/N] " -n 1 -r
+    echo
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        # Enable the config toggle
+        "$INSTALL_DIR/bin/agent-memory" config set hooks.error_nudge=true 2>/dev/null || true
+
+        case "$choice" in
+            1)
+                install_opencode_hooks
+                ;;
+            2)
+                install_claude_code_hooks
+                ;;
+            a|A)
+                install_opencode_hooks
+                install_claude_code_hooks
+                ;;
+        esac
+        echo "  Error-detection hooks installed and enabled."
+    else
+        echo "  Skipping hooks. Enable later with: agent-memory config set hooks.error_nudge=true"
+    fi
+
 else
     echo ""
     echo "Skipping agent integrations (--no-integrations flag)."

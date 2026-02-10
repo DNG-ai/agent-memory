@@ -197,6 +197,11 @@ def projects(ctx: click.Context) -> None:
     type=click.Choice(["factual", "decision", "task_history", "session_summary"]),
     help="Memory category (auto-detected if not specified)",
 )
+@click.option(
+    "--meta",
+    multiple=True,
+    help="Add metadata as key=value (repeatable, e.g. --meta rationale='...' --meta status=approved)",
+)
 @click.pass_context
 def save(
     ctx: click.Context,
@@ -205,6 +210,7 @@ def save(
     group_names: str | None,
     pin: bool,
     category: str | None,
+    meta: tuple[str, ...],
 ) -> None:
     """Save a new memory.
 
@@ -230,6 +236,21 @@ def save(
         scope = "project"
         groups = None
 
+    # Parse --meta key=value pairs
+    metadata: dict[str, Any] | None = None
+    if meta:
+        metadata = {}
+        for item in meta:
+            if "=" not in item:
+                console.print(f"[red]Invalid metadata format: '{item}'. Use key=value[/red]")
+                sys.exit(1)
+            key, value = item.split("=", 1)
+            key = key.strip()
+            if not key:
+                console.print("[red]Metadata key cannot be empty[/red]")
+                sys.exit(1)
+            metadata[key] = value
+
     project_path = get_current_project_path()
 
     with get_store(config, project_path) as store:
@@ -239,6 +260,7 @@ def save(
             scope=scope,
             pinned=pin,
             source="user_explicit",
+            metadata=metadata,
             groups=groups,
         )
 
@@ -264,6 +286,8 @@ def save(
         console.print("  [red]Pinned[/red]")
     if groups:
         console.print(f"  [blue]Groups: {', '.join(groups)}[/blue]")
+    if metadata:
+        console.print(f"  [dim]Metadata: {json.dumps(metadata)}[/dim]")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -908,6 +932,246 @@ def session_load(ctx: click.Context, last: bool, session_id: str | None) -> None
         for summary in summaries:
             console.print(f"\n[dim]{format_timestamp(summary.created_at)}[/dim]")
             console.print(f"  {summary.content}")
+
+
+@session.command("analyze")
+@click.argument("content", required=False)
+@click.option("--last", is_flag=True, help="Analyze the last session")
+@click.option("--session", "session_id", help="Analyze a specific session")
+@click.option("--dry-run", is_flag=True, help="Show patterns without saving")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def session_analyze(
+    ctx: click.Context,
+    content: str | None,
+    last: bool,
+    session_id: str | None,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Extract error-fix patterns from session content.
+
+    Analyzes session content using LLM and saves discovered
+    error-fix patterns as memories.
+
+    Examples:
+        agent-memory session analyze "Hit TypeError in auth.ts, fixed with optional chaining"
+        agent-memory session analyze --last --dry-run
+        agent-memory session analyze --session sess_abc123 --json
+    """
+    config: Config = ctx.obj["config"]
+
+    # Determine content source
+    if content:
+        analyze_content = content
+        source_label = "text"
+    elif last or session_id:
+        project_path = get_current_project_path()
+        from agent_memory.session import SessionManager
+
+        with get_store(config, project_path) as store:
+            manager = SessionManager(config, store, None, project_path)
+
+            if last:
+                summaries = manager.load_last_session_context()
+                source_label = "last_session"
+            else:
+                summaries = manager.get_session_summaries(session_id)
+                source_label = session_id or "unknown"
+
+            if not summaries:
+                console.print("[dim]No session summaries found to analyze.[/dim]")
+                sys.exit(1)
+
+            analyze_content = "\n".join(s.content for s in summaries)
+    else:
+        console.print("[red]Provide content text, --last, or --session[/red]")
+        sys.exit(1)
+
+    # Require LLM
+    from agent_memory.llm import get_llm_provider
+
+    llm = get_llm_provider(config)
+    if llm is None:
+        console.print("[red]LLM provider not available. Enable semantic search first.[/red]")
+        console.print("  agent-memory config set semantic.enabled=true")
+        sys.exit(1)
+
+    # Extract patterns
+    patterns = llm.extract_patterns(analyze_content)
+
+    if not patterns:
+        if as_json:
+            console.print(json.dumps([]))
+        else:
+            console.print("[dim]No error-fix patterns found.[/dim]")
+        return
+
+    if dry_run:
+        if as_json:
+            console.print(json.dumps(patterns, indent=2))
+        else:
+            console.print(f"\n[bold]Found {len(patterns)} error-fix patterns (dry run)[/bold]\n")
+            for i, p in enumerate(patterns, 1):
+                console.print(f"  [{i}] Error: {p.get('error', 'N/A')}")
+                console.print(f"      Cause: {p.get('cause', 'N/A')}")
+                console.print(f"      Fix: {p.get('fix', 'N/A')}")
+                console.print(f"      Context: {p.get('context', 'N/A')}")
+                console.print()
+        return
+
+    # Save patterns as memories
+    project_path = get_current_project_path()
+    saved_ids: list[str] = []
+
+    with get_store(config, project_path) as store:
+        vector_store = get_vector_store(config, project_path)
+
+        for p in patterns:
+            error = p.get("error", "Unknown error")
+            cause = p.get("cause", "Unknown cause")
+            fix = p.get("fix", "Unknown fix")
+            ctx_field = p.get("context", "Unknown context")
+
+            memory_content = f"Error→Fix: {error} in {ctx_field} — {fix}"
+
+            metadata = {
+                "error": error,
+                "cause": cause,
+                "fix": fix,
+                "context": ctx_field,
+                "analyzed_from": source_label,
+            }
+
+            memory = store.save(
+                content=memory_content,
+                category="factual",
+                scope="project",
+                source="auto_analysis",
+                metadata=metadata,
+            )
+
+            if vector_store:
+                try:
+                    vector_store.add(
+                        memory_id=memory.id,
+                        content=memory_content,
+                        category="factual",
+                        scope="project",
+                        groups=None,
+                    )
+                except Exception:
+                    pass
+
+            saved_ids.append(memory.id)
+
+    if as_json:
+        output = []
+        for p, mid in zip(patterns, saved_ids):
+            p["memory_id"] = mid
+            output.append(p)
+        console.print(json.dumps(output, indent=2))
+    else:
+        console.print(f"\n[green]Saved {len(saved_ids)} error-fix patterns:[/green]\n")
+        for p, mid in zip(patterns, saved_ids):
+            console.print(f"  [cyan]{mid}[/cyan]")
+            console.print(f"    Error: {p.get('error', 'N/A')}")
+            console.print(f"    Fix: {p.get('fix', 'N/A')}")
+            console.print()
+
+
+# ─────────────────────────────────────────────────────────────
+# HOOK COMMANDS
+# ─────────────────────────────────────────────────────────────
+@main.group()
+def hook() -> None:
+    """Hook commands for agent integration."""
+    pass
+
+
+@hook.command("check-error")
+@click.pass_context
+def hook_check_error(ctx: click.Context) -> None:
+    """Check tool output for errors and emit a nudge if found.
+
+    Reads JSON from stdin (tool output from agent hooks).
+    If errors detected and hooks.error_nudge is enabled, prints a reminder.
+    """
+    config: Config = ctx.obj["config"]
+
+    # Check config toggle
+    if not config.hooks.error_nudge:
+        return
+
+    # Read stdin
+    try:
+        stdin_text = sys.stdin.read()
+        if not stdin_text.strip():
+            return
+    except Exception:
+        return
+
+    # Try to extract output text from JSON
+    output_text = ""
+    try:
+        data = json.loads(stdin_text)
+        # Support various JSON shapes from different hooks
+        if isinstance(data, dict):
+            output_text = (
+                data.get("tool_response", "")
+                or data.get("stdout", "")
+                or data.get("output", "")
+                or data.get("result", "")
+                or str(data)
+            )
+        elif isinstance(data, str):
+            output_text = data
+        else:
+            output_text = str(data)
+    except (json.JSONDecodeError, ValueError):
+        # Not JSON, treat raw text as output
+        output_text = stdin_text
+
+    if not output_text:
+        return
+
+    # Scan for error indicators
+    error_keywords = [
+        "Error", "ERROR", "error:",
+        "FAILED", "FAIL",
+        "fatal:", "Fatal:",
+        "panic:",
+        "Traceback",
+        "Exception", "exception:",
+        "ECONNREFUSED", "ENOENT", "EACCES", "EPERM",
+        "segfault", "Segmentation fault",
+        "ModuleNotFoundError",
+        "ImportError",
+        "SyntaxError",
+        "TypeError",
+        "ValueError",
+        "KeyError",
+        "AttributeError",
+        "RuntimeError",
+        "FileNotFoundError",
+        "PermissionError",
+        "ConnectionError",
+        "TimeoutError",
+        "command not found",
+        "No such file or directory",
+    ]
+
+    found = any(kw in output_text for kw in error_keywords)
+    if not found:
+        return
+
+    # Emit nudge
+    click.echo(
+        "[agent-memory] Error detected in command output. "
+        "If you resolved this error, consider saving the pattern:\n"
+        '  agent-memory save --meta error="..." --meta root_cause="..." '
+        '"Description of the fix"'
+    )
 
 
 # ─────────────────────────────────────────────────────────────

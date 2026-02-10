@@ -25,26 +25,85 @@ This loads:
 
 **Note:** Group-scoped memories are NOT loaded by default. Only include them when the user requests via `--groups`.
 
+## When to Search Memory
+
+Search proactively — don't wait until you're stuck:
+
+- **Before starting any task** — check for prior work, decisions, or patterns related to the task
+- **Before asking the user a question** — the answer may already be saved
+- **When encountering unfamiliar code** — check for saved navigation aids or architecture notes
+- **When debugging** — search for known error patterns and past fixes
+
+```bash
+agent-memory search "topic to search for"
+
+# Include group memories in search (works from any directory)
+agent-memory search "pattern" --group=backend-team
+```
+
 ## Auto-Save Triggers
 
 Save memories automatically when:
 
-1. **Completing a significant task** - Record what was done and key learnings
-2. **User says "remember this"** - Save the referenced information
-3. **Learning something important** - Architecture decisions, patterns, user preferences
+1. **Completing a significant task** — Record what was done and key decisions
+2. **User says "remember this"** — Save the referenced information
+3. **Learning something important** — Architecture decisions, patterns, user preferences
+4. **Fixing a non-obvious bug** — Save the error-cause-fix pattern so it's not re-debugged
+5. **Discovering project conventions** — Build commands, test patterns, file organization
 
 ```bash
 # Save to current project (default)
 agent-memory save "The billing service uses Stripe webhooks at /api/webhooks/stripe"
 
-# Save a user decision/preference
-agent-memory save --category=decision "User prefers functional components over classes"
+# Save a user decision/preference with rationale
+agent-memory save --category=decision --meta rationale="performance" --meta alternatives="Redis,Memcached" \
+  "Use in-memory caching for session data"
 
 # Pin critical information (always loaded at startup)
 agent-memory save --pin "CRITICAL: Never modify the legacy auth module directly"
 
 # Save globally (visible to all projects)
 agent-memory save --global "User prefers tabs over spaces"
+
+# Save a debugging pattern
+agent-memory save "Tests fail with ECONNREFUSED when Redis is not running — start with: docker compose up redis"
+
+# Attach structured metadata to any memory
+agent-memory save --meta status=approved --meta decided_by=user "Deploy via GitHub Actions, not CircleCI"
+```
+
+## Writing Good Memories
+
+**Be specific and searchable:**
+- GOOD: `"Auth middleware is in src/middleware/auth.ts — validates JWT from Authorization header"`
+- BAD: `"There's an auth file somewhere"`
+
+**Include the WHY, not just the WHAT:**
+- GOOD: `"Using Zustand over Redux — simpler API, less boilerplate for our small state needs"`
+- BAD: `"We use Zustand"`
+
+**Save error-fix patterns with context:**
+- GOOD: `"'Cannot read property of undefined' in UserProfile — caused by API returning null when user has no avatar. Fix: add optional chaining on user.avatar?.url"`
+- BAD: `"Fixed a bug in UserProfile"`
+
+**Don't save:**
+- Transient state (current git branch, temporary workarounds being actively changed)
+- Obvious things the codebase makes clear (e.g., "this is a React project" when package.json shows it)
+- Exact code snippets that will change — describe the pattern instead
+
+## Memory Maintenance
+
+When you notice a memory is wrong or outdated:
+
+```bash
+# Remove outdated memories
+agent-memory forget mem_abc123
+
+# Update a memory with fresh content
+# (search → forget old → save new)
+agent-memory search "outdated topic"
+agent-memory forget mem_abc123
+agent-memory save "Updated information about the topic"
 ```
 
 ## Workspace Groups (IMPORTANT - Read Carefully)
@@ -129,16 +188,11 @@ Before ending a session, summarize the work accomplished:
 agent-memory session summarize "Brief summary of what was done and key decisions made"
 ```
 
-## Search Before Asking
-
-Before asking the user about something, check if you have relevant memories:
-
-```bash
-agent-memory search "topic to search for"
-
-# Include group memories in search (works from any directory)
-agent-memory search "pattern" --group=backend-team
-```
+A good session summary includes:
+- What tasks were completed
+- Key decisions made (and why)
+- Anything left unfinished or blocked
+- New patterns or conventions established
 
 ## Quick Group Memory Access
 
@@ -157,6 +211,28 @@ agent-memory groups backend-team --pinned
 # List group memories directly
 agent-memory list --group=backend-team
 agent-memory list --group=all  # all groups
+```
+
+## Error-Fix Pattern Analysis
+
+After a debugging session, extract and save error-fix patterns automatically:
+
+```bash
+# Analyze inline text
+agent-memory session analyze "Hit TypeError in auth.ts, null check missing, fixed with optional chaining"
+
+# Analyze last session summaries
+agent-memory session analyze --last
+
+# Preview without saving
+agent-memory session analyze --last --dry-run
+```
+
+If error-detection hooks are enabled, you'll see reminders when errors occur in command output. Save the pattern when you fix it:
+
+```bash
+agent-memory save --meta error="ECONNREFUSED" --meta root_cause="Redis not running" \
+  "Tests fail with ECONNREFUSED — start Redis with: docker compose up redis"
 ```
 
 ## Full Documentation

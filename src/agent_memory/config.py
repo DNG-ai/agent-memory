@@ -60,6 +60,9 @@ DEFAULT_CONFIG = {
         "search_limit": 5,
         "include_global": True,
     },
+    "hooks": {
+        "error_nudge": False,
+    },
 }
 
 
@@ -114,6 +117,13 @@ class RelevanceConfig:
 
 
 @dataclass
+class HooksConfig:
+    """Hooks configuration for agent integrations."""
+
+    error_nudge: bool = False
+
+
+@dataclass
 class LLMConfig:
     """LLM configuration for summarization (compaction).
 
@@ -136,6 +146,7 @@ class Config:
     expiration: ExpirationConfig
     relevance: RelevanceConfig
     llm: LLMConfig
+    hooks: HooksConfig
 
     @property
     def global_path(self) -> Path:
@@ -250,6 +261,11 @@ def _build_config(base_path: Path, data: dict[str, Any]) -> Config:
         claude_model=llm_data.get("claude", {}).get("model", "claude-3-haiku-20240307"),
     )
 
+    hooks_data = data.get("hooks", {})
+    hooks = HooksConfig(
+        error_nudge=hooks_data.get("error_nudge", False),
+    )
+
     return Config(
         base_path=base_path,
         semantic=semantic,
@@ -258,6 +274,7 @@ def _build_config(base_path: Path, data: dict[str, Any]) -> Config:
         expiration=expiration,
         relevance=relevance,
         llm=llm,
+        hooks=hooks,
     )
 
 
