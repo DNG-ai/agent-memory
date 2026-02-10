@@ -610,6 +610,14 @@ def get(ctx: click.Context, memory_id: str) -> None:
         display_memory(memory, verbose=True)
 
 
+@main.command()
+@click.argument("memory_id")
+@click.pass_context
+def show(ctx: click.Context, memory_id: str) -> None:
+    """Show a specific memory by ID (alias for 'get')."""
+    ctx.invoke(get, memory_id=memory_id)
+
+
 # ─────────────────────────────────────────────────────────────
 # PIN/UNPIN COMMANDS
 # ─────────────────────────────────────────────────────────────
