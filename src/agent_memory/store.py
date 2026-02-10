@@ -898,6 +898,59 @@ class MemoryStore:
         conn.commit()
         return cursor.rowcount
 
+    def get_most_accessed(self, scope: str = "project", limit: int = 10) -> list[Memory]:
+        """Get most frequently accessed memories.
+
+        Args:
+            scope: Memory scope to query
+            limit: Maximum number of results
+
+        Returns:
+            List of memories ordered by access_count DESC
+        """
+        conn = self._get_conn(scope)
+
+        query = "SELECT * FROM memories WHERE access_count > 0"
+        params: list[Any] = []
+
+        if scope in ("group", "global"):
+            query += " AND scope = ?"
+            params.append(scope)
+
+        query += " ORDER BY access_count DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = conn.execute(query, params)
+        return [Memory.from_row(row) for row in cursor.fetchall()]
+
+    def get_pin_candidates(
+        self, scope: str = "project", min_access: int = 3, limit: int = 10
+    ) -> list[Memory]:
+        """Get high-access memories that are not pinned (candidates for pinning).
+
+        Args:
+            scope: Memory scope to query
+            min_access: Minimum access_count to qualify
+            limit: Maximum number of results
+
+        Returns:
+            List of unpinned memories with high access counts
+        """
+        conn = self._get_conn(scope)
+
+        query = "SELECT * FROM memories WHERE access_count >= ? AND pinned = 0"
+        params: list[Any] = [min_access]
+
+        if scope in ("group", "global"):
+            query += " AND scope = ?"
+            params.append(scope)
+
+        query += " ORDER BY access_count DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = conn.execute(query, params)
+        return [Memory.from_row(row) for row in cursor.fetchall()]
+
     def count(self, scope: str = "project") -> int:
         """Count memories in scope."""
         conn = self._get_conn(scope)

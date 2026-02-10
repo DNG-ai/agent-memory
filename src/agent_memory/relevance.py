@@ -392,4 +392,12 @@ class RelevanceEngine:
             if query_lower in content_lower:
                 score += 0.2
 
+        # Access frequency boost (logarithmic, capped)
+        if memory.access_count > 0:
+            import math
+
+            max_boost = self.config.relevance.access_weight
+            access_boost = min(max_boost, max_boost * math.log2(1 + memory.access_count) / 5)
+            score += access_boost
+
         return min(score, 1.0)

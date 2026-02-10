@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
     "relevance": {
         "search_limit": 5,
         "include_global": True,
+        "access_weight": 0.1,
     },
     "hooks": {
         "error_nudge": False,
@@ -114,6 +115,7 @@ class RelevanceConfig:
 
     search_limit: int = 5
     include_global: bool = True
+    access_weight: float = 0.1
 
 
 @dataclass
@@ -252,6 +254,7 @@ def _build_config(base_path: Path, data: dict[str, Any]) -> Config:
     relevance = RelevanceConfig(
         search_limit=relevance_data.get("search_limit", 5),
         include_global=relevance_data.get("include_global", True),
+        access_weight=relevance_data.get("access_weight", 0.1),
     )
 
     llm_data = data.get("llm", {})

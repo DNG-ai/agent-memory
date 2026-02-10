@@ -29,6 +29,18 @@ from agent_memory.utils import (
 console = Console()
 
 
+def _record_access_for_memories(store: MemoryStore, memories: list[Memory]) -> None:
+    """Record access for memories, grouped by scope. Never raises."""
+    try:
+        by_scope: dict[str, list[str]] = {}
+        for m in memories:
+            by_scope.setdefault(m.scope, []).append(m.id)
+        for scope, ids in by_scope.items():
+            store.record_access_batch(ids, scope)
+    except Exception:
+        pass
+
+
 def get_store(config: Config, project_path: Path | None = None) -> MemoryStore:
     """Get a memory store instance."""
     if project_path is None:
@@ -145,6 +157,10 @@ def main(ctx: click.Context) -> None:
     """Agent Memory - Long-term memory store for AI agents."""
     ctx.ensure_object(dict)
     ctx.obj["config"] = load_config()
+
+    from agent_memory.event_log import EventLog
+
+    ctx.obj["event_log"] = EventLog(ctx.obj["config"])
 
 
 # ─────────────────────────────────────────────────────────────
@@ -289,6 +305,15 @@ def save(
     if metadata:
         console.print(f"  [dim]Metadata: {json.dumps(metadata)}[/dim]")
 
+    try:
+        ctx.obj["event_log"].log(
+            "save",
+            project_path=str(project_path) if project_path else None,
+            metadata={"scope": scope, "category": memory.category, "pinned": pin},
+        )
+    except Exception:
+        pass
+
 
 # ─────────────────────────────────────────────────────────────
 # SEARCH COMMAND
@@ -374,6 +399,7 @@ def search(
                 keyword_results = [m for m in keyword_results if m.category == category]
 
             if keyword_results:
+                _record_access_for_memories(store, keyword_results)
                 title = f"Search Results: '{query}'"
                 if group_name.lower() != "all":
                     title += f" (including group '{group_name}')"
@@ -383,6 +409,16 @@ def search(
                 display_memories_table(keyword_results)
             else:
                 console.print("[dim]No memories found matching your query.[/dim]")
+
+            try:
+                ctx.obj["event_log"].log(
+                    "search",
+                    project_path=str(get_current_project_path()),
+                    result_count=len(keyword_results),
+                    metadata={"query": query},
+                )
+            except Exception:
+                pass
         return
 
     # Standard mode
@@ -439,11 +475,23 @@ def search(
 
         if keyword_results:
             results_found = True
+            _record_access_for_memories(store, keyword_results)
             console.print(f"\n[bold]Keyword Search Results[/bold] ({len(keyword_results)} found)")
             display_memories_table(keyword_results)
 
     if not results_found:
         console.print("[dim]No memories found matching your query.[/dim]")
+
+    try:
+        total_results = len(keyword_results) if keyword_results else 0
+        ctx.obj["event_log"].log(
+            "search",
+            project_path=str(project_path),
+            result_count=total_results,
+            metadata={"query": query},
+        )
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -612,6 +660,16 @@ def list_memories(
 
         display_memories_table(memories, title)
 
+    try:
+        scope_label = "global" if is_global else "project"
+        ctx.obj["event_log"].log(
+            "list",
+            result_count=len(memories),
+            metadata={"scope": scope_label},
+        )
+    except Exception:
+        pass
+
 
 # ─────────────────────────────────────────────────────────────
 # GET COMMAND
@@ -631,7 +689,22 @@ def get(ctx: click.Context, memory_id: str) -> None:
             console.print(f"[red]Memory not found: {memory_id}[/red]")
             sys.exit(1)
 
+        try:
+            store.record_access(memory_id, memory.scope)
+        except Exception:
+            pass
+
         display_memory(memory, verbose=True)
+
+    try:
+        ctx.obj["event_log"].log(
+            "get",
+            project_path=str(project_path),
+            result_count=1,
+            metadata={"memory_id": memory_id},
+        )
+    except Exception:
+        pass
 
 
 @main.command()
@@ -753,6 +826,16 @@ def forget(
 
             console.print(f"[green]Deleted {count} memories.[/green]")
 
+    try:
+        deleted_count = 1 if memory_id else count if search_query else 0
+        ctx.obj["event_log"].log(
+            "forget",
+            project_path=str(project_path),
+            result_count=deleted_count,
+        )
+    except Exception:
+        pass
+
 
 # ─────────────────────────────────────────────────────────────
 # RESET COMMAND
@@ -825,6 +908,11 @@ def session_start(ctx: click.Context) -> None:
         session = manager.start_session()
         console.print(f"[green]Started session: {session.id}[/green]")
 
+    try:
+        ctx.obj["event_log"].log("session", subcommand="start", project_path=str(project_path))
+    except Exception:
+        pass
+
 
 @session.command("end")
 @click.pass_context
@@ -847,6 +935,11 @@ def session_end(ctx: click.Context) -> None:
         else:
             console.print("[dim]No active session to end.[/dim]")
 
+    try:
+        ctx.obj["event_log"].log("session", subcommand="end", project_path=str(project_path))
+    except Exception:
+        pass
+
 
 @session.command("summarize")
 @click.argument("content")
@@ -864,6 +957,13 @@ def session_summarize(ctx: click.Context, content: str) -> None:
 
         memory = manager.add_summary(content)
         console.print(f"[green]Added summary: {memory.id}[/green]")
+
+    try:
+        ctx.obj["event_log"].log(
+            "session", subcommand="summarize", project_path=str(project_path)
+        )
+    except Exception:
+        pass
 
 
 @session.command("list")
@@ -928,10 +1028,22 @@ def session_load(ctx: click.Context, last: bool, session_id: str | None) -> None
             console.print("[dim]No summaries found for this session.[/dim]")
             return
 
+        _record_access_for_memories(store, summaries)
+
         console.print(f"[bold]Session Summaries[/bold] ({len(summaries)} found)")
         for summary in summaries:
             console.print(f"\n[dim]{format_timestamp(summary.created_at)}[/dim]")
             console.print(f"  {summary.content}")
+
+    try:
+        ctx.obj["event_log"].log(
+            "session",
+            subcommand="load",
+            project_path=str(project_path),
+            result_count=len(summaries),
+        )
+    except Exception:
+        pass
 
 
 @session.command("analyze")
@@ -1078,6 +1190,16 @@ def session_analyze(
             console.print(f"    Error: {p.get('error', 'N/A')}")
             console.print(f"    Fix: {p.get('fix', 'N/A')}")
             console.print()
+
+    try:
+        ctx.obj["event_log"].log(
+            "session",
+            subcommand="analyze",
+            result_count=len(patterns),
+            metadata={"dry_run": dry_run},
+        )
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1824,6 +1946,10 @@ def startup(
             exclude_groups=exclude_list,
         )
 
+        _record_access_for_memories(
+            store, context.pinned_memories + context.group_memories
+        )
+
         if as_json:
             data = {
                 "pinned_memories": [m.to_dict() for m in context.pinned_memories],
@@ -1855,6 +1981,15 @@ def startup(
                     console.print(
                         "  Summaries available. Load with: agent-memory session load --last"
                     )
+
+    try:
+        ctx.obj["event_log"].log(
+            "startup",
+            project_path=str(project_path),
+            result_count=len(context.pinned_memories) + len(context.group_memories),
+        )
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2140,6 +2275,16 @@ def prune(
         deleted = engine.prune(candidates)
         console.print(f"\n[green]Deleted {deleted} memories.[/green]")
 
+    try:
+        ctx.obj["event_log"].log(
+            "prune",
+            project_path=str(project_path),
+            result_count=deleted if not dry_run else len(candidates),
+            metadata={"dry_run": dry_run},
+        )
+    except Exception:
+        pass
+
 
 # ─────────────────────────────────────────────────────────────
 # COMPACT COMMAND
@@ -2303,6 +2448,203 @@ def compact(
         console.print(
             f"\n[green]Compacted {compacted_count} memories into {len(clusters)} summaries.[/green]"
         )
+
+    try:
+        ctx.obj["event_log"].log(
+            "compact",
+            project_path=str(project_path),
+            result_count=compacted_count if not dry_run else summary["total_memories"],
+            metadata={"dry_run": dry_run},
+        )
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────
+# USAGE COMMAND
+# ─────────────────────────────────────────────────────────────
+@main.command()
+@click.option("--since", default="30d", help="Time period (e.g., 7d, 30d, 90d)")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def usage(ctx: click.Context, since: str, as_json: bool) -> None:
+    """Show usage tracking and effectiveness analytics.
+
+    Examples:
+        agent-memory usage
+        agent-memory usage --since 7d
+        agent-memory usage --since 90d
+        agent-memory usage --json
+    """
+    config: Config = ctx.obj["config"]
+    event_log = ctx.obj["event_log"]
+
+    # Parse --since
+    if since.endswith("d"):
+        try:
+            since_days = int(since[:-1])
+        except ValueError:
+            console.print(f"[red]Invalid --since format: {since}[/red]")
+            sys.exit(1)
+    else:
+        console.print("[red]--since must end with 'd' (e.g., 30d)[/red]")
+        sys.exit(1)
+
+    from datetime import timedelta
+
+    from agent_memory.utils import get_timestamp
+
+    now = get_timestamp()
+
+    # 1. Command frequency
+    command_counts = event_log.get_command_counts(since_days)
+
+    # 2. Search effectiveness
+    search_stats = event_log.get_search_stats(since_days)
+
+    # 3. Session compliance
+    session_stats = event_log.get_session_stats(since_days)
+
+    # 4. Memory effectiveness (from memory stores)
+    project_path = get_current_project_path()
+    total_memories = 0
+    never_accessed = 0
+    most_accessed: list[Memory] = []
+    pin_candidates: list[Memory] = []
+    old_never_accessed = 0
+
+    with get_store(config, project_path) as store:
+        for check_scope in ["project", "global"]:
+            try:
+                memories = store.list(scope=check_scope, limit=100000)
+                total_memories += len(memories)
+                never_accessed += sum(1 for m in memories if m.access_count == 0)
+                old_never_accessed += sum(
+                    1
+                    for m in memories
+                    if m.access_count == 0
+                    and (now - m.created_at) >= timedelta(days=90)
+                    and not m.pinned
+                )
+            except Exception:
+                continue
+
+        # Get most accessed across scopes
+        for check_scope in ["project", "global"]:
+            try:
+                most_accessed.extend(store.get_most_accessed(check_scope, 5))
+            except Exception:
+                continue
+        most_accessed.sort(key=lambda m: m.access_count, reverse=True)
+        most_accessed = most_accessed[:5]
+
+        # Get pin candidates
+        for check_scope in ["project", "global"]:
+            try:
+                pin_candidates.extend(store.get_pin_candidates(check_scope, 5, 5))
+            except Exception:
+                continue
+        pin_candidates.sort(key=lambda m: m.access_count, reverse=True)
+        pin_candidates = pin_candidates[:5]
+
+    # 5. Build recommendations
+    recommendations: list[dict[str, str]] = []
+
+    for m in pin_candidates:
+        recommendations.append({
+            "action": "pin",
+            "memory_id": m.id,
+            "reason": f"Accessed {m.access_count} times but not pinned",
+        })
+
+    if old_never_accessed > 0:
+        recommendations.append({
+            "action": "prune",
+            "reason": f"{old_never_accessed} memories are >90d old and never accessed",
+        })
+
+    if search_stats["total_searches"] > 0 and search_stats["zero_result_rate"] > 0.15:
+        pct = int(search_stats["zero_result_rate"] * 100)
+        recommendations.append({
+            "action": "search",
+            "reason": f"{pct}% of searches return 0 results",
+        })
+
+    if as_json:
+        result = {
+            "period_days": since_days,
+            "command_frequency": command_counts,
+            "search_effectiveness": search_stats,
+            "session_compliance": session_stats,
+            "memory_effectiveness": {
+                "total_memories": total_memories,
+                "never_accessed": never_accessed,
+                "never_accessed_pct": round(never_accessed / max(total_memories, 1) * 100, 1),
+                "most_accessed": [
+                    {"id": m.id, "access_count": m.access_count, "content": truncate_text(m.content, 60)}
+                    for m in most_accessed
+                ],
+            },
+            "recommendations": recommendations,
+        }
+        console.print(json.dumps(result, indent=2))
+    else:
+        console.print(f"\n[bold]Usage Report (last {since_days}d)[/bold]\n")
+
+        # Command frequency
+        console.print("[cyan]Command Frequency[/cyan]")
+        if command_counts:
+            for cmd, count in command_counts.items():
+                console.print(f"  {cmd + ':':<25} {count}")
+        else:
+            console.print("  [dim]No commands recorded yet.[/dim]")
+
+        # Search effectiveness
+        console.print("\n[cyan]Search Effectiveness[/cyan]")
+        if search_stats["total_searches"] > 0:
+            console.print(f"  Total searches:      {search_stats['total_searches']}")
+            console.print(f"  Avg results/search:  {search_stats['avg_result_count']}")
+            zero_pct = int(search_stats["zero_result_rate"] * 100)
+            console.print(
+                f"  Zero-result rate:    {zero_pct}% ({search_stats['zero_result_count']}/{search_stats['total_searches']})"
+            )
+        else:
+            console.print("  [dim]No searches recorded yet.[/dim]")
+
+        # Memory effectiveness
+        console.print("\n[cyan]Memory Effectiveness[/cyan]")
+        console.print(f"  Total memories:      {total_memories}")
+        if total_memories > 0:
+            never_pct = round(never_accessed / total_memories * 100)
+            console.print(f"  Never accessed:      {never_accessed} ({never_pct}%)")
+        if most_accessed:
+            console.print("  Most-used:")
+            for m in most_accessed:
+                console.print(f"    {m.id} ({m.access_count}x): \"{truncate_text(m.content, 50)}\"")
+
+        # Agent compliance
+        console.print("\n[cyan]Agent Compliance[/cyan]")
+        console.print(f"  Startup calls:             {session_stats['startup_count']}")
+        if session_stats["startup_count"] > 0 or session_stats["session_starts"] > 0:
+            total_sessions = max(session_stats["startup_count"], session_stats["session_starts"])
+            summarize_pct = int(session_stats["summarize_rate"] * 100)
+            console.print(
+                f"  Sessions with summaries:   {summarize_pct}% ({session_stats['summarize_count']}/{total_sessions})"
+            )
+        else:
+            console.print("  [dim]No sessions recorded yet.[/dim]")
+
+        # Recommendations
+        if recommendations:
+            console.print("\n[yellow]Recommendations[/yellow]")
+            for rec in recommendations:
+                action = rec["action"]
+                reason = rec["reason"]
+                memory_id = rec.get("memory_id", "")
+                if memory_id:
+                    console.print(f"  [{action}]  {memory_id}: {reason}")
+                else:
+                    console.print(f"  [{action}]  {reason}")
 
 
 if __name__ == "__main__":
