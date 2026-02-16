@@ -466,17 +466,33 @@ class MemoryStore:
         scope: str = "project",
         limit: int = 10,
     ) -> list[Memory]:
-        """Search memories by keyword (case-insensitive, multi-term)."""
-        terms = query.strip().split()
-        if not terms:
+        """Search memories by keyword (case-insensitive).
+
+        Supports OR syntax: "term1 OR term2" matches either term.
+        Terms within an OR-group are ANDed: "a b OR c" means (a AND b) OR c.
+        """
+        stripped = query.strip()
+        if not stripped:
             return []
+
         conn = self._get_conn(scope)
-        conditions = []
         params: list[Any] = []
-        for term in terms:
-            conditions.append("LOWER(content) LIKE ?")
-            params.append(f"%{term.lower()}%")
-        where_clause = " AND ".join(conditions)
+
+        # Split on " OR " (case-sensitive) to get OR-groups
+        or_groups = [g.strip() for g in stripped.split(" OR ") if g.strip()]
+        if not or_groups:
+            return []
+
+        or_clauses = []
+        for group in or_groups:
+            terms = group.split()
+            and_conditions = []
+            for term in terms:
+                and_conditions.append("LOWER(content) LIKE ?")
+                params.append(f"%{term.lower()}%")
+            or_clauses.append(f"({' AND '.join(and_conditions)})")
+
+        where_clause = " OR ".join(or_clauses)
         params.append(limit)
         cursor = conn.execute(
             f"SELECT * FROM memories WHERE {where_clause} ORDER BY created_at DESC LIMIT ?",

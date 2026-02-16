@@ -322,7 +322,7 @@ def save(
 @click.argument("query")
 @click.option("--limit", default=5, help="Maximum results")
 @click.option("--threshold", type=float, help="Similarity threshold (0.0-1.0)")
-@click.option("--global", "include_global", is_flag=True, help="Include global memories")
+@click.option("--global/--no-global", "include_global", default=None, help="Include global memories (default: from config)")
 @click.option(
     "--category",
     type=click.Choice(["factual", "decision", "task_history", "session_summary"]),
@@ -357,10 +357,17 @@ def search(
 ) -> None:
     """Search memories by query.
 
+    By default, includes global memories (controlled by config relevance.include_global).
+    Use --no-global to exclude global memories.
+
     By default, includes memories from descendant projects (hierarchical lookup).
     Use --exact to only search the current project directory.
     """
     config: Config = ctx.obj["config"]
+
+    # Resolve --global default from config
+    if include_global is None:
+        include_global = config.relevance.include_global
 
     # Cross-project mode (for users, not agents)
     if all_projects:

@@ -151,6 +151,30 @@ class TestMemoryStore:
         results = store.search_keyword("poetry", "project")
         assert len(results) == 2
 
+    def test_search_keyword_or_syntax(self, store: MemoryStore) -> None:
+        """Test that OR syntax matches any group."""
+        store.save(content="Authentication uses JWT tokens", scope="project")
+        store.save(content="Database uses PostgreSQL", scope="project")
+        store.save(content="Frontend uses React components", scope="project")
+
+        # OR should match either term
+        results = store.search_keyword("JWT OR PostgreSQL", "project")
+        assert len(results) == 2
+
+        # Single OR with no match on one side
+        results = store.search_keyword("JWT OR nonexistent", "project")
+        assert len(results) == 1
+
+        # Mixed AND within OR groups: "JWT tokens OR PostgreSQL"
+        # "JWT tokens" = JWT AND tokens, "PostgreSQL" = single term
+        results = store.search_keyword("JWT tokens OR PostgreSQL", "project")
+        assert len(results) == 2
+
+        # AND within OR group that narrows results
+        results = store.search_keyword("JWT nonexistent OR PostgreSQL", "project")
+        assert len(results) == 1
+        assert "PostgreSQL" in results[0].content
+
     def test_search_keyword_empty_query(self, store: MemoryStore) -> None:
         """Test that empty/whitespace queries return empty list."""
         store.save(content="Some content", scope="project")
