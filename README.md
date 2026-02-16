@@ -2,6 +2,43 @@
 
 Long-term memory store for AI agents. Enables agents (OpenCode, Claude Code) to save, search, and manage persistent memories across sessions.
 
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [When to Use What: Memory Store vs CLAUDE.md vs Skills](#when-to-use-what-memory-store-vs-claudemd-vs-skills)
+  - [CLAUDE.md / agents.md (Static Instructions)](#claudemd--agentsmd-static-instructions)
+  - [Skills (On-Demand Instructions)](#skills-on-demand-instructions)
+  - [Memory Store (agent-memory)](#memory-store-agent-memory)
+  - [Decision Matrix](#decision-matrix)
+  - [Rule of Thumb](#rule-of-thumb)
+- [CLI Reference](#cli-reference)
+  - [Core Commands](#core-commands)
+  - [Session Commands](#session-commands)
+  - [Configuration](#configuration)
+  - [Group Commands](#group-commands)
+  - [Sharing Commands](#sharing-commands)
+  - [Other Commands](#other-commands)
+  - [Cross-Project Visibility (User Only)](#cross-project-visibility-user-only)
+- [Workspace Groups](#workspace-groups)
+  - [Creating and Managing Groups](#creating-and-managing-groups)
+  - [Sharing Memories with Groups](#sharing-memories-with-groups)
+  - [How Sharing Works](#how-sharing-works)
+  - [Promote/Unpromote](#promoteunpromote)
+- [Memory Categories](#memory-categories)
+- [Configuration](#configuration-1)
+- [Embedding Providers](#embedding-providers)
+  - [Vertex AI (for OpenCode)](#vertex-ai-for-opencode)
+  - [Voyage AI (for Claude Code)](#voyage-ai-for-claude-code)
+- [Integration](#integration)
+  - [OpenCode](#opencode)
+  - [Claude Code](#claude-code)
+- [Storage Layout](#storage-layout)
+- [Development](#development)
+- [Architecture](#architecture)
+- [License](#license)
+
 ## Features
 
 - **Persistent Memory** - Save learnings, decisions, and context that persist across sessions
