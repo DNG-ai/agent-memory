@@ -228,6 +228,81 @@ class EventLog:
                 "summarize_rate": 0.0,
             }
 
+    def get_recent_searches(self, since_days: int = 30, limit: int = 50) -> list[dict[str, Any]]:
+        """Get recent search queries with result counts.
+
+        Returns list of dicts with: query, result_count, timestamp, project_path.
+        """
+        try:
+            conn = self._get_conn()
+            cutoff = (get_timestamp() - timedelta(days=since_days)).isoformat()
+            cursor = conn.execute(
+                """
+                SELECT timestamp, project_path, result_count, metadata
+                FROM events
+                WHERE command = 'search' AND timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            )
+            results: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                ts, proj, count, meta_str = row
+                meta = json.loads(meta_str) if meta_str else {}
+                results.append({
+                    "query": meta.get("query", ""),
+                    "result_count": count if count is not None else 0,
+                    "timestamp": ts,
+                    "project_path": proj,
+                })
+            return results
+        except Exception:
+            return []
+
+    def get_top_queries(self, since_days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
+        """Get most frequent search queries aggregated.
+
+        Returns list of dicts with: query, count, avg_results, zero_result_count.
+        """
+        try:
+            conn = self._get_conn()
+            cutoff = (get_timestamp() - timedelta(days=since_days)).isoformat()
+            cursor = conn.execute(
+                """
+                SELECT metadata, result_count
+                FROM events
+                WHERE command = 'search' AND timestamp >= ?
+                """,
+                (cutoff,),
+            )
+            query_agg: dict[str, dict[str, Any]] = {}
+            for row in cursor.fetchall():
+                meta_str, result_count = row
+                meta = json.loads(meta_str) if meta_str else {}
+                q = meta.get("query", "").strip().lower()
+                if not q:
+                    continue
+                if q not in query_agg:
+                    query_agg[q] = {"count": 0, "total_results": 0, "zero_results": 0}
+                query_agg[q]["count"] += 1
+                rc = result_count if result_count is not None else 0
+                query_agg[q]["total_results"] += rc
+                if rc == 0:
+                    query_agg[q]["zero_results"] += 1
+
+            results = []
+            for q, agg in sorted(query_agg.items(), key=lambda x: x[1]["count"], reverse=True)[:limit]:
+                results.append({
+                    "query": q,
+                    "count": agg["count"],
+                    "avg_results": round(agg["total_results"] / agg["count"], 1),
+                    "zero_result_count": agg["zero_results"],
+                })
+            return results
+        except Exception:
+            return []
+
     def close(self) -> None:
         """Close the database connection."""
         if self._conn:

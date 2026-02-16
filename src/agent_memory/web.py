@@ -8,9 +8,10 @@ from typing import Any
 from flask import Flask, jsonify, render_template, request
 
 from agent_memory.config import Config, load_config
+from agent_memory.event_log import EventLog
 from agent_memory.groups import GroupManager
 from agent_memory.store import MemoryStore
-from agent_memory.utils import get_current_project_path
+from agent_memory.utils import get_current_project_path, truncate_text
 
 
 def create_app(config: Config | None = None, project_path: Path | None = None) -> Flask:
@@ -385,6 +386,95 @@ def create_app(config: Config | None = None, project_path: Path | None = None) -
             "group_names": [g.name for g in groups],
             "project_list": project_list,
             "current_project": str(project_path) if project_path else None,
+        })
+
+    # ── Usage / Analytics ─────────────────────────────────────────
+
+    @app.route("/api/usage")
+    def get_usage():
+        since_days = int(request.args.get("since_days", "30"))
+        event_log = EventLog(config)
+
+        try:
+            command_counts = event_log.get_command_counts(since_days)
+            search_stats = event_log.get_search_stats(since_days)
+            session_stats = event_log.get_session_stats(since_days)
+        finally:
+            event_log.close()
+
+        # Memory effectiveness from store
+        from datetime import timedelta
+        from agent_memory.utils import get_timestamp
+
+        now = get_timestamp()
+        total_memories = 0
+        never_accessed = 0
+        most_accessed = []
+        pin_candidates = []
+
+        with get_store() as store:
+            for check_scope in ["project", "global"]:
+                try:
+                    memories = store.list(scope=check_scope, limit=100000)
+                    total_memories += len(memories)
+                    never_accessed += sum(1 for m in memories if m.access_count == 0)
+                except Exception:
+                    continue
+
+            for check_scope in ["project", "global"]:
+                try:
+                    most_accessed.extend(store.get_most_accessed(check_scope, 5))
+                except Exception:
+                    continue
+            most_accessed.sort(key=lambda m: m.access_count, reverse=True)
+            most_accessed = most_accessed[:5]
+
+            for check_scope in ["project", "global"]:
+                try:
+                    pin_candidates.extend(store.get_pin_candidates(check_scope, 5, 5))
+                except Exception:
+                    continue
+            pin_candidates.sort(key=lambda m: m.access_count, reverse=True)
+            pin_candidates = pin_candidates[:5]
+
+        # Recommendations
+        recommendations: list[dict[str, str]] = []
+        for m in pin_candidates:
+            recommendations.append({
+                "action": "pin",
+                "memory_id": m.id,
+                "reason": f"Accessed {m.access_count} times but not pinned",
+            })
+        if search_stats["total_searches"] > 0 and search_stats["zero_result_rate"] > 0.15:
+            pct = int(search_stats["zero_result_rate"] * 100)
+            recommendations.append({
+                "action": "search",
+                "reason": f"{pct}% of searches return 0 results",
+            })
+
+        # Search insights
+        recent_searches = event_log.get_recent_searches(since_days, limit=50)
+        top_queries = event_log.get_top_queries(since_days, limit=20)
+
+        return jsonify({
+            "period_days": since_days,
+            "command_frequency": command_counts,
+            "search_effectiveness": search_stats,
+            "session_compliance": session_stats,
+            "memory_effectiveness": {
+                "total_memories": total_memories,
+                "never_accessed": never_accessed,
+                "never_accessed_pct": round(never_accessed / max(total_memories, 1) * 100, 1),
+                "most_accessed": [
+                    {"id": m.id, "access_count": m.access_count, "content": truncate_text(m.content, 60)}
+                    for m in most_accessed
+                ],
+            },
+            "search_insights": {
+                "recent_searches": recent_searches,
+                "top_queries": top_queries,
+            },
+            "recommendations": recommendations,
         })
 
     # ── Config ──────────────────────────────────────────────────
