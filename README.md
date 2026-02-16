@@ -62,6 +62,156 @@ agent-memory list --category=decision
 agent-memory startup --json
 ```
 
+## When to Use What: Memory Store vs CLAUDE.md vs Skills
+
+AI coding agents have three mechanisms for persistent knowledge. Each serves a different purpose — using the right one avoids context bloat and keeps information where it's most useful.
+
+### CLAUDE.md / agents.md (Static Instructions)
+
+**What it is:** Markdown files checked into your repo (or in `~/.claude/rules/`) that are loaded into the agent's context every session.
+
+**Use when the knowledge is:**
+- Fixed project conventions that rarely change ("always use `bun`, never `npm`")
+- Build/test/lint commands the agent should always know
+- Architectural rules and guardrails ("never modify the legacy auth module directly")
+- Coding standards (formatting, naming, import ordering)
+- Repo structure orientation ("API routes are in `src/routes/`, DB models in `src/models/`")
+
+**Characteristics:**
+- Always loaded — no search needed, always in context
+- Version-controlled with the project
+- Same for every contributor
+- Limited by context window — keep it concise
+
+**Examples:**
+```markdown
+# CLAUDE.md
+- Run tests: `pytest -x --tb=short`
+- This project uses SQLAlchemy 2.0 async style
+- All API endpoints must return JSON:API format
+```
+
+### Skills (On-Demand Instructions)
+
+**What it is:** Detailed reference docs loaded only when explicitly invoked (e.g., `/agent-memory`, `/commit`).
+
+**Use when the knowledge is:**
+- Detailed command reference or API documentation
+- Complex multi-step workflows (deployment procedures, release checklists)
+- Specialized tool usage guides
+- Anything too large to justify loading every session
+
+**Characteristics:**
+- Loaded on demand — keeps context clean until needed
+- Static content, authored by humans
+- Good for lengthy reference material that would bloat CLAUDE.md
+- Invoked by name when the agent (or user) needs it
+
+**Examples:**
+- Full CLI reference for a tool (`/agent-memory` loads the complete command docs)
+- PR creation workflow with templates and checklists
+- Database migration procedures
+
+### Memory Store (agent-memory)
+
+**What it is:** A dynamic, searchable database of learned knowledge that accumulates across sessions.
+
+**Use when the knowledge is:**
+- Discovered during work, not known upfront
+- Decisions made collaboratively that need rationale preserved
+- Evolving — may be updated or invalidated as the project changes
+- Personal to the developer, not the repo
+- Cross-project or cross-team
+- Contextual and needs semantic search
+
+**Characteristics:**
+- Dynamic — grows and changes across sessions
+- Searchable via semantic similarity
+- Scoped (project, group, or global)
+- Not version-controlled — lives in `~/.agent-memory/`
+- Agent-driven — the agent saves, searches, and maintains memories
+
+**Use Cases:**
+
+**1. Architectural decisions and rationale**
+Track why choices were made so future sessions don't revisit settled debates.
+```bash
+agent-memory save --category=decision \
+  --meta alternatives="Redis,Memcached" --meta rationale="performance" \
+  "Using in-memory caching for session data — Redis overkill for our scale, revisit at 10k DAU"
+```
+
+**2. Error-fix patterns and debugging insights**
+Save the error-cause-fix chain so the same bug isn't re-debugged from scratch.
+```bash
+agent-memory save --meta error="CORS 403" --meta root_cause="missing content-type" \
+  "CORS errors on /api/upload — caused by missing multipart/form-data in allowed content types. Fix: add to CORS config in src/middleware/cors.ts"
+```
+
+**3. Codebase navigation aids**
+Bookmark hard-to-find code paths so the agent doesn't re-explore every session.
+```bash
+agent-memory save "Auth flow: request hits src/middleware/auth.ts → validates JWT → attaches user to req.ctx → routes check req.ctx.user.role for RBAC"
+```
+
+**4. User preferences and workflow habits**
+Remember how the developer likes to work, globally across all projects.
+```bash
+agent-memory save --global "User prefers detailed commit messages with bullet points for each change"
+agent-memory save --global "Always suggest running tests before committing"
+```
+
+**5. Team and cross-project conventions**
+Share patterns across related services using workspace groups.
+```bash
+agent-memory save --group=backend-services --pin \
+  "All backend services must use structured JSON logging with request_id correlation"
+agent-memory save --group=backend-services \
+  "API versioning: use URL path /v1/, /v2/ — never header-based versioning"
+```
+
+**6. Environment and infrastructure gotchas**
+Capture tribal knowledge about dev environment quirks.
+```bash
+agent-memory save "Local dev requires Docker for Postgres and Redis — run: docker compose up -d db redis"
+agent-memory save "CI tests flake on the billing module when run in parallel — use: pytest tests/billing/ -p no:xdist"
+```
+
+**7. Incomplete work and continuation context**
+Leave breadcrumbs for the next session to pick up where you left off.
+```bash
+agent-memory session summarize "Implemented webhook handler for Stripe events. Still TODO: add idempotency check using event ID, and retry logic for failed deliveries. See src/webhooks/stripe.ts:45"
+```
+
+**8. Project-specific patterns the codebase doesn't make obvious**
+Document implicit conventions that aren't enforced by linters or types.
+```bash
+agent-memory save "All database queries go through the repository pattern — never call prisma directly from route handlers. Repos are in src/repos/"
+agent-memory save "Feature flags are managed via LaunchDarkly. Check flags in src/flags.ts before adding conditionals"
+```
+
+### Decision Matrix
+
+| Scenario | Use |
+|----------|-----|
+| "Always run `make lint` before committing" | CLAUDE.md |
+| "Our API uses JSON:API format" | CLAUDE.md |
+| "Full `agent-memory` CLI reference" | Skill |
+| "Step-by-step release process with 12 steps" | Skill |
+| "We chose Postgres over MongoDB because..." | Memory Store |
+| "TypeError in auth.ts — fixed by adding null check" | Memory Store |
+| "User prefers tabs over spaces" | Memory Store (global) |
+| "All backend services must use structured logging" | Memory Store (group) |
+| "The test DB resets between runs, don't cache fixtures" | Memory Store or CLAUDE.md* |
+
+*\*If it's a permanent project rule, put it in CLAUDE.md. If it was discovered during a session and might evolve, save it as a memory.*
+
+### Rule of Thumb
+
+- **Will every session need this?** → CLAUDE.md
+- **Is it reference material loaded on demand?** → Skill
+- **Was it learned, decided, or discovered?** → Memory Store
+
 ## CLI Reference
 
 ### Core Commands

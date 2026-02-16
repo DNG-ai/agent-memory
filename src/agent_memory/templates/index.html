@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Memory</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    .fade-in { animation: fadeIn 0.15s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-200 min-h-screen" x-data="memoryApp()" x-init="init()">
+
+  <!-- Top bar -->
+  <header class="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-30">
+    <div class="max-w-screen-xl mx-auto flex items-center gap-4 px-4 h-14">
+      <h1 class="text-lg font-semibold text-white tracking-tight">Agent Memory</h1>
+      <div class="flex-1"></div>
+      <span class="text-xs text-gray-500" x-text="`${stats.total ?? 0} memories`"></span>
+      <button @click="view = 'stats'" :class="view === 'stats' ? 'text-blue-400' : 'text-gray-400 hover:text-gray-200'" class="text-sm">Stats</button>
+      <button @click="showCreate = true" class="bg-blue-600 hover:bg-blue-500 text-white text-sm px-3 py-1.5 rounded-md">+ New</button>
+    </div>
+  </header>
+
+  <div class="max-w-screen-xl mx-auto flex" style="min-height: calc(100vh - 3.5rem);">
+
+    <!-- Sidebar -->
+    <aside class="w-56 shrink-0 border-r border-gray-800 p-4 space-y-5 overflow-y-auto" style="max-height: calc(100vh - 3.5rem);">
+      <!-- Scope -->
+      <div>
+        <div class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Scope</div>
+        <template x-for="s in ['project', 'global', 'group']" :key="s">
+          <button
+            @click="scope = s; selectedMemory = null; loadMemories()"
+            :class="scope === s ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'"
+            class="block w-full text-left text-sm px-3 py-1.5 rounded-md capitalize mb-1"
+          >
+            <span x-text="s === 'project' ? 'Projects' : s"></span>
+            <span class="text-xs text-gray-500 ml-1" x-text="scopeCount(s)"></span>
+          </button>
+        </template>
+      </div>
+
+      <!-- Project picker (when project scope selected) -->
+      <div x-show="scope === 'project' && stats.project_list?.length" x-cloak>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-xs font-medium text-gray-500 uppercase tracking-wider">Projects</div>
+          <button @click="toggleAllProjects()" class="text-xs text-blue-400 hover:text-blue-300" x-text="allProjectsSelected() ? 'None' : 'All'"></button>
+        </div>
+        <template x-for="p in stats.project_list" :key="p.path">
+          <label class="flex items-center gap-2 text-sm text-gray-400 hover:text-gray-200 cursor-pointer py-1 px-1 rounded hover:bg-gray-800/50">
+            <input type="checkbox" :value="p.path" x-model="selectedProjects" @change="loadMemories()"
+              class="rounded bg-gray-800 border-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 w-3.5 h-3.5">
+            <span class="truncate flex-1 text-xs" x-text="p.name" :title="p.path"></span>
+            <span class="text-xs text-gray-600 shrink-0" x-text="p.count"></span>
+          </label>
+        </template>
+      </div>
+
+      <!-- Group filter (when group scope selected) -->
+      <div x-show="scope === 'group' && stats.group_names?.length" x-cloak>
+        <div class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Group</div>
+        <button @click="groupFilter = ''; loadMemories()" :class="!groupFilter ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-gray-200'" class="block w-full text-left text-sm px-3 py-1.5 rounded-md mb-1">All groups</button>
+        <template x-for="g in stats.group_names" :key="g">
+          <button @click="groupFilter = g; loadMemories()" :class="groupFilter === g ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-gray-200'" class="block w-full text-left text-sm px-3 py-1.5 rounded-md mb-1 truncate" x-text="g"></button>
+        </template>
+      </div>
+
+      <!-- Category filter -->
+      <div x-show="Object.keys(stats.categories || {}).length">
+        <div class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Category</div>
+        <button @click="categoryFilter = ''; loadMemories()" :class="!categoryFilter ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-gray-200'" class="block w-full text-left text-sm px-3 py-1.5 rounded-md mb-1">All</button>
+        <template x-for="[cat, cnt] in Object.entries(stats.categories || {})" :key="cat">
+          <button @click="categoryFilter = cat; loadMemories()" :class="categoryFilter === cat ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-gray-200'" class="block w-full text-left text-sm px-3 py-1.5 rounded-md mb-1">
+            <span x-text="cat"></span> <span class="text-xs text-gray-500" x-text="cnt"></span>
+          </button>
+        </template>
+      </div>
+
+      <!-- Pinned toggle -->
+      <div>
+        <label class="flex items-center gap-2 text-sm text-gray-400 cursor-pointer hover:text-gray-200">
+          <input type="checkbox" x-model="pinnedOnly" @change="loadMemories()" class="rounded bg-gray-800 border-gray-700 text-blue-500 focus:ring-blue-500">
+          Pinned only
+        </label>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="flex-1 min-w-0">
+
+      <!-- ── Memory list view ── -->
+      <div x-show="view === 'list'" x-cloak>
+        <!-- Search bar -->
+        <div class="border-b border-gray-800 p-4">
+          <input
+            type="text" x-model="searchQuery"
+            @input.debounce.300ms="loadMemories()"
+            placeholder="Search memories..."
+            class="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+          >
+        </div>
+
+        <div class="flex">
+          <!-- Memory list -->
+          <div :class="selectedMemory ? 'w-1/2' : 'w-full'" class="border-r border-gray-800">
+            <div x-show="loading" class="p-8 text-center text-gray-500">Loading...</div>
+            <div x-show="!loading && memories.length === 0" class="p-8 text-center text-gray-500">No memories found.</div>
+            <template x-for="m in memories" :key="m.id">
+              <div
+                @click="selectMemory(m)"
+                :class="selectedMemory?.id === m.id ? 'bg-gray-800/80 border-l-2 border-l-blue-500' : 'border-l-2 border-l-transparent hover:bg-gray-800/40'"
+                class="border-b border-gray-800/60 px-4 py-3 cursor-pointer fade-in"
+              >
+                <div class="flex items-start gap-2">
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm text-gray-200 line-clamp-2" x-text="m.content"></div>
+                    <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+                      <span class="text-xs px-1.5 py-0.5 rounded bg-gray-800 text-gray-400" x-text="m.category"></span>
+                      <span class="text-xs text-gray-500" x-text="m.scope"></span>
+                      <span x-show="m.pinned" class="text-xs text-red-400">pinned</span>
+                      <span x-show="m.groups?.length" class="text-xs text-purple-400" x-text="m.groups?.join(', ')"></span>
+                      <span x-show="m.project_path && scope === 'project'" class="text-xs text-gray-600" x-text="m.project_path?.split('/').pop()"></span>
+                      <span class="text-xs text-gray-600 ml-auto" x-text="formatDate(m.created_at)"></span>
+                    </div>
+                  </div>
+                  <span class="text-xs font-mono text-gray-600 shrink-0" x-text="m.id.slice(0, 8)"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Detail panel -->
+          <div x-show="selectedMemory" x-cloak class="w-1/2 p-4 space-y-4 overflow-y-auto" style="max-height: calc(100vh - 7rem);">
+            <template x-if="selectedMemory">
+              <div class="fade-in">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="font-mono text-sm text-gray-400" x-text="selectedMemory.id"></span>
+                  <button @click="selectedMemory = null" class="text-gray-500 hover:text-gray-300 text-lg">&times;</button>
+                </div>
+
+                <!-- Content (view / edit) -->
+                <div x-show="!editing">
+                  <div class="bg-gray-900 rounded-lg p-4 text-sm text-gray-200 whitespace-pre-wrap" x-text="selectedMemory.content"></div>
+                </div>
+                <div x-show="editing" x-cloak>
+                  <textarea x-model="editContent" rows="6" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"></textarea>
+                  <select x-model="editCategory" class="mt-2 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm text-gray-300">
+                    <option value="factual">factual</option>
+                    <option value="decision">decision</option>
+                    <option value="task_history">task_history</option>
+                    <option value="session_summary">session_summary</option>
+                  </select>
+                </div>
+
+                <!-- Meta info -->
+                <div class="grid grid-cols-2 gap-2 mt-4 text-xs text-gray-500">
+                  <div>Scope: <span class="text-gray-300" x-text="selectedMemory.scope"></span></div>
+                  <div>Category: <span class="text-gray-300" x-text="selectedMemory.category"></span></div>
+                  <div>Created: <span class="text-gray-300" x-text="formatDate(selectedMemory.created_at)"></span></div>
+                  <div>Updated: <span class="text-gray-300" x-text="formatDate(selectedMemory.updated_at)"></span></div>
+                  <div>Source: <span class="text-gray-300" x-text="selectedMemory.source"></span></div>
+                  <div>Pinned: <span class="text-gray-300" x-text="selectedMemory.pinned ? 'Yes' : 'No'"></span></div>
+                  <div x-show="selectedMemory.project_path" class="col-span-2">Project: <span class="text-gray-300" x-text="selectedMemory.project_path"></span></div>
+                  <div x-show="selectedMemory.access_count">Accesses: <span class="text-gray-300" x-text="selectedMemory.access_count"></span></div>
+                  <div x-show="selectedMemory.groups?.length">Groups: <span class="text-purple-400" x-text="selectedMemory.groups?.join(', ')"></span></div>
+                </div>
+
+                <!-- Metadata -->
+                <div x-show="selectedMemory.metadata && Object.keys(selectedMemory.metadata).length" class="mt-3">
+                  <div class="text-xs text-gray-500 mb-1">Metadata</div>
+                  <pre class="bg-gray-900 rounded-md p-2 text-xs text-gray-400 overflow-x-auto" x-text="JSON.stringify(selectedMemory.metadata, null, 2)"></pre>
+                </div>
+
+                <!-- Actions -->
+                <div class="flex flex-wrap gap-2 mt-4 pt-4 border-t border-gray-800">
+                  <template x-if="!editing">
+                    <div class="flex flex-wrap gap-2">
+                      <button @click="startEdit()" class="text-xs px-3 py-1.5 rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700">Edit</button>
+                      <button @click="togglePin(selectedMemory)" class="text-xs px-3 py-1.5 rounded-md bg-gray-800 hover:bg-gray-700" :class="selectedMemory.pinned ? 'text-red-400' : 'text-gray-300'" x-text="selectedMemory.pinned ? 'Unpin' : 'Pin'"></button>
+                      <button @click="deleteMemory(selectedMemory)" class="text-xs px-3 py-1.5 rounded-md bg-red-900/30 text-red-400 hover:bg-red-900/50">Delete</button>
+
+                      <!-- Scope actions -->
+                      <template x-if="selectedMemory.scope === 'project'">
+                        <button @click="promoteMemory(selectedMemory)" class="text-xs px-3 py-1.5 rounded-md bg-gray-800 text-blue-400 hover:bg-gray-700">Promote to Global</button>
+                      </template>
+                      <template x-if="selectedMemory.scope === 'global' || selectedMemory.scope === 'group'">
+                        <button @click="unPromoteMemory(selectedMemory)" class="text-xs px-3 py-1.5 rounded-md bg-gray-800 text-yellow-400 hover:bg-gray-700">Unpromote to Project</button>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="editing">
+                    <div class="flex gap-2">
+                      <button @click="saveEdit()" class="text-xs px-3 py-1.5 rounded-md bg-blue-600 text-white hover:bg-blue-500">Save</button>
+                      <button @click="editing = false" class="text-xs px-3 py-1.5 rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700">Cancel</button>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Stats view ── -->
+      <div x-show="view === 'stats'" x-cloak class="p-6 space-y-6 fade-in">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-semibold text-white">Statistics</h2>
+          <button @click="view = 'list'" class="text-sm text-gray-400 hover:text-gray-200">&larr; Back</button>
+        </div>
+        <div class="grid grid-cols-4 gap-4">
+          <div class="bg-gray-900 rounded-lg p-4">
+            <div class="text-2xl font-bold text-white" x-text="stats.total ?? 0"></div>
+            <div class="text-xs text-gray-500">Total</div>
+          </div>
+          <div class="bg-gray-900 rounded-lg p-4">
+            <div class="text-2xl font-bold text-blue-400" x-text="stats.projects_total ?? 0"></div>
+            <div class="text-xs text-gray-500">Projects</div>
+          </div>
+          <div class="bg-gray-900 rounded-lg p-4">
+            <div class="text-2xl font-bold text-green-400" x-text="stats.global_count ?? 0"></div>
+            <div class="text-xs text-gray-500">Global</div>
+          </div>
+          <div class="bg-gray-900 rounded-lg p-4">
+            <div class="text-2xl font-bold text-purple-400" x-text="stats.group_count ?? 0"></div>
+            <div class="text-xs text-gray-500">Group</div>
+          </div>
+        </div>
+
+        <!-- Per-project breakdown -->
+        <div x-show="stats.project_list?.length">
+          <h3 class="text-sm font-medium text-gray-400 mb-3">By Project</h3>
+          <div class="space-y-2">
+            <template x-for="p in stats.project_list" :key="p.path">
+              <div class="bg-gray-900 rounded-lg px-4 py-3 flex items-center justify-between">
+                <div class="min-w-0">
+                  <div class="text-sm text-gray-200 truncate" x-text="p.name"></div>
+                  <div class="text-xs text-gray-600 truncate" x-text="p.path"></div>
+                </div>
+                <span class="text-sm font-semibold text-white shrink-0 ml-3" x-text="p.count"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <div x-show="Object.keys(stats.categories || {}).length">
+          <h3 class="text-sm font-medium text-gray-400 mb-3">By Category</h3>
+          <div class="grid grid-cols-2 gap-3">
+            <template x-for="[cat, cnt] in Object.entries(stats.categories || {})" :key="cat">
+              <div class="bg-gray-900 rounded-lg px-4 py-3 flex items-center justify-between">
+                <span class="text-sm text-gray-300" x-text="cat"></span>
+                <span class="text-sm font-semibold text-white" x-text="cnt"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+        <div x-show="stats.group_names?.length">
+          <h3 class="text-sm font-medium text-gray-400 mb-3">Workspace Groups</h3>
+          <div class="flex flex-wrap gap-2">
+            <template x-for="g in stats.group_names" :key="g">
+              <span class="text-sm px-3 py-1.5 rounded-full bg-purple-900/30 text-purple-300" x-text="g"></span>
+            </template>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Create modal -->
+  <div x-show="showCreate" x-cloak class="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 flex items-center justify-center" @click.self="showCreate = false">
+    <div class="bg-gray-900 border border-gray-700 rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 fade-in" @click.stop>
+      <h3 class="text-lg font-semibold text-white mb-4">New Memory</h3>
+      <textarea x-model="newContent" rows="4" placeholder="Memory content..." class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500 mb-3"></textarea>
+      <div class="flex gap-3 mb-4">
+        <select x-model="newScope" class="bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-gray-300">
+          <option value="project">project</option>
+          <option value="global">global</option>
+          <option value="group">group</option>
+        </select>
+        <select x-model="newCategory" class="bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-gray-300">
+          <option value="">auto-detect</option>
+          <option value="factual">factual</option>
+          <option value="decision">decision</option>
+          <option value="task_history">task_history</option>
+          <option value="session_summary">session_summary</option>
+        </select>
+        <label class="flex items-center gap-1.5 text-sm text-gray-400">
+          <input type="checkbox" x-model="newPinned" class="rounded bg-gray-800 border-gray-700 text-blue-500">
+          Pin
+        </label>
+      </div>
+      <div x-show="newScope === 'group'" class="mb-4" x-cloak>
+        <input type="text" x-model="newGroups" placeholder="Group names (comma-separated)" class="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
+      </div>
+      <div class="flex justify-end gap-2">
+        <button @click="showCreate = false" class="text-sm px-4 py-2 rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700">Cancel</button>
+        <button @click="createMemory()" class="text-sm px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-500">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition class="fixed bottom-4 right-4 z-50 px-4 py-2 rounded-lg text-sm shadow-lg" :class="toastType === 'error' ? 'bg-red-900 text-red-200' : 'bg-gray-800 text-gray-200'" x-text="toast"></div>
+
+  <script>
+    function memoryApp() {
+      return {
+        // State
+        view: 'list',
+        scope: 'project',
+        selectedProjects: [],   // paths of checked projects (empty = all)
+        groupFilter: '',
+        categoryFilter: '',
+        pinnedOnly: false,
+        searchQuery: '',
+        memories: [],
+        selectedMemory: null,
+        loading: false,
+        stats: {},
+
+        // Edit state
+        editing: false,
+        editContent: '',
+        editCategory: '',
+
+        // Create state
+        showCreate: false,
+        newContent: '',
+        newScope: 'project',
+        newCategory: '',
+        newPinned: false,
+        newGroups: '',
+
+        // Toast
+        toast: '',
+        toastType: 'info',
+
+        async init() {
+          await this.loadStats();
+          // Default: all projects selected
+          this.selectedProjects = (this.stats.project_list || []).map(p => p.path);
+          await this.loadMemories();
+        },
+
+        async loadStats() {
+          try {
+            const res = await fetch('/api/stats');
+            this.stats = await res.json();
+          } catch (e) {
+            console.error('Failed to load stats', e);
+          }
+        },
+
+        async loadMemories() {
+          this.loading = true;
+          this.view = 'list';
+          try {
+            const params = new URLSearchParams();
+            params.set('scope', this.scope);
+            params.set('limit', '100');
+            if (this.searchQuery) params.set('q', this.searchQuery);
+            if (this.categoryFilter) params.set('category', this.categoryFilter);
+            if (this.pinnedOnly) params.set('pinned', 'true');
+
+            if (this.scope === 'project') {
+              // Send selected projects (empty selectedProjects = nothing selected = show nothing)
+              const allPaths = (this.stats.project_list || []).map(p => p.path);
+              const isAll = this.selectedProjects.length === allPaths.length;
+              if (!isAll && this.selectedProjects.length > 0) {
+                params.set('projects', this.selectedProjects.join(','));
+              }
+              // If all selected, don't send projects param (backend returns all)
+              // If none selected, send empty string to get nothing
+              if (this.selectedProjects.length === 0) {
+                params.set('projects', '__none__');
+              }
+            }
+
+            if (this.scope === 'group' && this.groupFilter) params.set('group', this.groupFilter);
+
+            const res = await fetch(`/api/memories?${params}`);
+            this.memories = await res.json();
+          } catch (e) {
+            console.error('Failed to load memories', e);
+            this.memories = [];
+          }
+          this.loading = false;
+        },
+
+        allProjectsSelected() {
+          const all = (this.stats.project_list || []).map(p => p.path);
+          return all.length > 0 && this.selectedProjects.length === all.length;
+        },
+
+        toggleAllProjects() {
+          const all = (this.stats.project_list || []).map(p => p.path);
+          if (this.allProjectsSelected()) {
+            this.selectedProjects = [];
+          } else {
+            this.selectedProjects = [...all];
+          }
+          this.loadMemories();
+        },
+
+        selectMemory(m) {
+          this.selectedMemory = m;
+          this.editing = false;
+        },
+
+        startEdit() {
+          this.editContent = this.selectedMemory.content;
+          this.editCategory = this.selectedMemory.category;
+          this.editing = true;
+        },
+
+        async saveEdit() {
+          try {
+            const res = await fetch(`/api/memories/${this.selectedMemory.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: this.editContent, category: this.editCategory }),
+            });
+            if (!res.ok) throw new Error((await res.json()).error);
+            const updated = await res.json();
+            this.selectedMemory = updated;
+            this.editing = false;
+            await this.loadMemories();
+            await this.loadStats();
+            this.showToast('Memory updated');
+          } catch (e) {
+            this.showToast(e.message, 'error');
+          }
+        },
+
+        async togglePin(m) {
+          const action = m.pinned ? 'unpin' : 'pin';
+          try {
+            const res = await fetch(`/api/memories/${m.id}/${action}`, { method: 'POST' });
+            if (!res.ok) throw new Error((await res.json()).error);
+            const updated = await res.json();
+            this.selectedMemory = updated;
+            await this.loadMemories();
+            this.showToast(m.pinned ? 'Unpinned' : 'Pinned');
+          } catch (e) {
+            this.showToast(e.message, 'error');
+          }
+        },
+
+        async deleteMemory(m) {
+          if (!confirm(`Delete memory ${m.id}?`)) return;
+          try {
+            const res = await fetch(`/api/memories/${m.id}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error((await res.json()).error);
+            this.selectedMemory = null;
+            await this.loadMemories();
+            await this.loadStats();
+            this.showToast('Memory deleted');
+          } catch (e) {
+            this.showToast(e.message, 'error');
+          }
+        },
+
+        async promoteMemory(m) {
+          try {
+            const res = await fetch(`/api/memories/${m.id}/promote`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            if (!res.ok) throw new Error((await res.json()).error);
+            this.selectedMemory = await res.json();
+            await this.loadMemories();
+            await this.loadStats();
+            this.showToast('Promoted to global');
+          } catch (e) {
+            this.showToast(e.message, 'error');
+          }
+        },
+
+        async unPromoteMemory(m) {
+          try {
+            const res = await fetch(`/api/memories/${m.id}/unpromote`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            if (!res.ok) throw new Error((await res.json()).error);
+            this.selectedMemory = await res.json();
+            await this.loadMemories();
+            await this.loadStats();
+            this.showToast('Unpromoted to project');
+          } catch (e) {
+            this.showToast(e.message, 'error');
+          }
+        },
+
+        async createMemory() {
+          if (!this.newContent.trim()) return;
+          const body = {
+            content: this.newContent.trim(),
+            scope: this.newScope,
+            pinned: this.newPinned,
+          };
+          if (this.newCategory) body.category = this.newCategory;
+          if (this.newScope === 'group' && this.newGroups.trim()) {
+            body.groups = this.newGroups.split(',').map(g => g.trim()).filter(Boolean);
+          }
+          try {
+            const res = await fetch('/api/memories', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!res.ok) throw new Error((await res.json()).error);
+            this.showCreate = false;
+            this.newContent = '';
+            this.newScope = 'project';
+            this.newCategory = '';
+            this.newPinned = false;
+            this.newGroups = '';
+            await this.loadMemories();
+            await this.loadStats();
+            this.showToast('Memory created');
+          } catch (e) {
+            this.showToast(e.message, 'error');
+          }
+        },
+
+        scopeCount(s) {
+          if (s === 'project') return this.stats.projects_total ?? '';
+          if (s === 'global') return this.stats.global_count ?? '';
+          if (s === 'group') return this.stats.group_count ?? '';
+          return '';
+        },
+
+        formatDate(iso) {
+          if (!iso) return '';
+          const d = new Date(iso);
+          return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        },
+
+        showToast(msg, type = 'info') {
+          this.toast = msg;
+          this.toastType = type;
+          setTimeout(() => { this.toast = ''; }, 2500);
+        },
+      };
+    }
+  </script>
+</body>
+</html>

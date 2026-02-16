@@ -1959,6 +1959,11 @@ def startup(
                 "previous_session_summaries": [
                     m.to_dict() for m in context.previous_session_summaries
                 ],
+                "hints": [
+                    'Before ending, run: agent-memory session summarize "<summary>"',
+                    'Search before starting: agent-memory search "<topic>"',
+                    'Save learnings after tasks: agent-memory save "<what you learned>"',
+                ],
             }
             console.print(json.dumps(data, indent=2))
         else:
@@ -2645,6 +2650,35 @@ def usage(ctx: click.Context, since: str, as_json: bool) -> None:
                     console.print(f"  [{action}]  {memory_id}: {reason}")
                 else:
                     console.print(f"  [{action}]  {reason}")
+
+
+# ─────────────────────────────────────────────────────────────
+# UI COMMAND
+# ─────────────────────────────────────────────────────────────
+@main.command()
+@click.option("--port", default=8765, help="Port to run on")
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--no-browser", is_flag=True, help="Don't auto-open browser")
+@click.pass_context
+def ui(ctx: click.Context, port: int, host: str, no_browser: bool) -> None:
+    """Launch the web UI for managing memories."""
+    config: Config = ctx.obj["config"]
+    project_path = get_current_project_path()
+
+    from agent_memory.web import create_app
+
+    app = create_app(config, project_path)
+
+    url = f"http://{host}:{port}"
+    console.print(f"[bold]Agent Memory UI[/bold] starting at [cyan]{url}[/cyan]")
+    console.print("[dim]Press Ctrl+C to stop[/dim]")
+
+    if not no_browser:
+        import webbrowser
+
+        webbrowser.open(url)
+
+    app.run(host=host, port=port, debug=False)
 
 
 if __name__ == "__main__":

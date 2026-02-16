@@ -466,16 +466,21 @@ class MemoryStore:
         scope: str = "project",
         limit: int = 10,
     ) -> list[Memory]:
-        """Search memories by keyword."""
+        """Search memories by keyword (case-insensitive, multi-term)."""
+        terms = query.strip().split()
+        if not terms:
+            return []
         conn = self._get_conn(scope)
+        conditions = []
+        params: list[Any] = []
+        for term in terms:
+            conditions.append("LOWER(content) LIKE ?")
+            params.append(f"%{term.lower()}%")
+        where_clause = " AND ".join(conditions)
+        params.append(limit)
         cursor = conn.execute(
-            """
-            SELECT * FROM memories 
-            WHERE content LIKE ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (f"%{query}%", limit),
+            f"SELECT * FROM memories WHERE {where_clause} ORDER BY created_at DESC LIMIT ?",
+            params,
         )
         memories = [Memory.from_row(row) for row in cursor.fetchall()]
         return [m for m in memories if not is_expired(m.expires_at)]
@@ -520,9 +525,12 @@ class MemoryStore:
         # Search group scope
         if include_groups:
             group_memories = self.list_by_group(limit=limit * 2)
-            # Filter by query
-            query_lower = query.lower()
-            matching = [m for m in group_memories if query_lower in m.content.lower()]
+            # Filter by query (case-insensitive, multi-term)
+            query_terms = query.lower().split()
+            matching = [
+                m for m in group_memories
+                if all(term in m.content.lower() for term in query_terms)
+            ]
 
             # Filter by group names if not "all"
             if "all" not in [g.lower() for g in include_groups]:
@@ -868,11 +876,20 @@ class MemoryStore:
         query: str,
         scope: str = "project",
     ) -> int:
-        """Delete memories matching a search query."""
+        """Delete memories matching a search query (case-insensitive)."""
         conn = self._get_conn(scope)
+        terms = query.strip().split()
+        if not terms:
+            return 0
+        conditions = []
+        params: list[Any] = []
+        for term in terms:
+            conditions.append("LOWER(content) LIKE ?")
+            params.append(f"%{term.lower()}%")
+        where_clause = " AND ".join(conditions)
         cursor = conn.execute(
-            "DELETE FROM memories WHERE content LIKE ?",
-            (f"%{query}%",),
+            f"DELETE FROM memories WHERE {where_clause}",
+            params,
         )
         conn.commit()
         return cursor.rowcount
@@ -1315,20 +1332,26 @@ class MemoryStore:
         query: str,
         limit: int = 10,
     ) -> list[Memory]:
-        """Search a specific database file by keyword."""
+        """Search a specific database file by keyword (case-insensitive, multi-term)."""
         if not db_path.exists():
+            return []
+
+        terms = query.strip().split()
+        if not terms:
             return []
 
         try:
             conn = sqlite3.connect(str(db_path))
+            conditions = []
+            params: list[Any] = []
+            for term in terms:
+                conditions.append("LOWER(content) LIKE ?")
+                params.append(f"%{term.lower()}%")
+            where_clause = " AND ".join(conditions)
+            params.append(limit)
             cursor = conn.execute(
-                """
-                SELECT * FROM memories 
-                WHERE content LIKE ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (f"%{query}%", limit),
+                f"SELECT * FROM memories WHERE {where_clause} ORDER BY created_at DESC LIMIT ?",
+                params,
             )
             memories = [Memory.from_row(row) for row in cursor.fetchall()]
             conn.close()

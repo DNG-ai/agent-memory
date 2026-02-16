@@ -117,6 +117,47 @@ class TestMemoryStore:
         assert len(results) == 2
         assert all("JWT" in m.content for m in results)
 
+    def test_search_keyword_case_insensitive(self, store: MemoryStore) -> None:
+        """Test that keyword search is case-insensitive."""
+        store.save(content="The API uses JWT tokens", scope="project")
+        store.save(content="Database is PostgreSQL", scope="project")
+        store.save(content="jwt tokens expire after 1 hour", scope="project")
+
+        # lowercase query should match uppercase content
+        results = store.search_keyword("jwt", "project")
+        assert len(results) == 2
+
+        # uppercase query should match lowercase content
+        results = store.search_keyword("JWT", "project")
+        assert len(results) == 2
+
+        # mixed case
+        results = store.search_keyword("Jwt", "project")
+        assert len(results) == 2
+
+    def test_search_keyword_multi_term(self, store: MemoryStore) -> None:
+        """Test that multi-term queries match all terms independently."""
+        store.save(content="Use poetry to run tests in this project", scope="project")
+        store.save(content="The poetry config is in pyproject.toml", scope="project")
+        store.save(content="Run pytest for unit tests", scope="project")
+
+        # Both terms must match
+        results = store.search_keyword("poetry test", "project")
+        assert len(results) == 1
+        assert "poetry" in results[0].content.lower()
+        assert "test" in results[0].content.lower()
+
+        # Single term matches more
+        results = store.search_keyword("poetry", "project")
+        assert len(results) == 2
+
+    def test_search_keyword_empty_query(self, store: MemoryStore) -> None:
+        """Test that empty/whitespace queries return empty list."""
+        store.save(content="Some content", scope="project")
+
+        assert store.search_keyword("", "project") == []
+        assert store.search_keyword("   ", "project") == []
+
     def test_update_memory(self, store: MemoryStore) -> None:
         """Test updating a memory."""
         memory = store.save(content="Original content", scope="project")
@@ -235,3 +276,70 @@ class TestGlobalStore:
         memories = global_store.list("global")
 
         assert len(memories) == 2
+
+
+class TestMetadata:
+    """Tests for metadata support."""
+
+    def test_save_with_metadata(self, store: MemoryStore) -> None:
+        """Test saving a memory with metadata."""
+        metadata = {"rationale": "Performance reasons", "status": "approved"}
+        memory = store.save(
+            content="Use Redis for caching",
+            scope="project",
+            metadata=metadata,
+        )
+
+        assert memory.metadata == metadata
+
+    def test_metadata_persists(self, store: MemoryStore) -> None:
+        """Test that metadata survives save/get round-trip."""
+        metadata = {"alternatives": "Memcached, in-memory", "decided_by": "team"}
+        memory = store.save(
+            content="Use Redis for caching",
+            scope="project",
+            metadata=metadata,
+        )
+
+        retrieved = store.get(memory.id, "project")
+        assert retrieved is not None
+        assert retrieved.metadata == metadata
+
+    def test_save_without_metadata(self, store: MemoryStore) -> None:
+        """Test that saving without metadata gives empty dict."""
+        memory = store.save(content="No metadata here", scope="project")
+
+        assert memory.metadata == {}
+
+        retrieved = store.get(memory.id, "project")
+        assert retrieved is not None
+        assert retrieved.metadata == {}
+
+    def test_update_metadata(self, store: MemoryStore) -> None:
+        """Test updating metadata on an existing memory."""
+        memory = store.save(
+            content="Original",
+            scope="project",
+            metadata={"key": "old"},
+        )
+
+        updated = store.update(
+            memory.id,
+            "project",
+            metadata={"key": "new", "extra": "value"},
+        )
+
+        assert updated is not None
+        assert updated.metadata == {"key": "new", "extra": "value"}
+
+    def test_metadata_in_to_dict(self, store: MemoryStore) -> None:
+        """Test that metadata appears in to_dict output."""
+        metadata = {"rationale": "Speed", "status": "approved"}
+        memory = store.save(
+            content="Use Redis",
+            scope="project",
+            metadata=metadata,
+        )
+
+        data = memory.to_dict()
+        assert data["metadata"] == metadata

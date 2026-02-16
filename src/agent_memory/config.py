@@ -83,7 +83,13 @@ class SemanticConfig:
 
 @dataclass
 class AutosaveConfig:
-    """Autosave configuration."""
+    """Autosave configuration.
+
+    Note: ``on_task_complete``, ``session_summary``, and
+    ``summary_interval_messages`` are advisory hints exposed in startup
+    output.  They are NOT enforced by agent-memory itself — the calling
+    agent is responsible for honoring them.
+    """
 
     enabled: bool = True
     on_task_complete: bool = True
