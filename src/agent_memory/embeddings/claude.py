@@ -17,9 +17,19 @@ class ClaudeEmbeddingProvider(EmbeddingProvider):
 
     # Voyage AI model dimensions
     MODEL_DIMENSIONS = {
+        # Voyage 4 series
+        "voyage-4-large": 2048,
+        "voyage-4": 1024,
+        "voyage-4-lite": 512,
+        "voyage-4-nano": 512,
+        # Voyage 3 series
+        "voyage-3-large": 1024,
+        "voyage-3.5": 1024,
+        "voyage-3.5-lite": 512,
         "voyage-3": 1024,
         "voyage-3-lite": 512,
         "voyage-code-3": 1024,
+        # Voyage 2 / legacy
         "voyage-finance-2": 1024,
         "voyage-law-2": 1024,
         "voyage-multilingual-2": 1024,
@@ -30,7 +40,7 @@ class ClaudeEmbeddingProvider(EmbeddingProvider):
     def __init__(
         self,
         api_key_env: str = "VOYAGE_API_KEY",
-        model: str = "voyage-3-lite",
+        model: str = "voyage-4-lite",
     ):
         """Initialize Claude/Voyage embedding provider.
 

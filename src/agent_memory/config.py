@@ -18,21 +18,21 @@ DEFAULT_CONFIG = {
         "vertex": {
             "project_id": "",
             "location": "us-central1",
-            "model": "text-embedding-004",
+            "model": "gemini-embedding-001",
         },
         "claude": {
             "api_key_env": "ANTHROPIC_API_KEY",
-            "model": "claude-3-haiku-20240307",
+            "model": "voyage-4-lite",
         },
     },
     "llm": {
         # LLM for summarization (compaction). Reuses semantic provider credentials.
-        "model": "gemini-2.0-flash",  # Default model for summarization
+        "model": "gemini-3-flash",  # Default model for summarization
         "vertex": {
-            "model": "gemini-2.0-flash",
+            "model": "gemini-3-flash",
         },
         "claude": {
-            "model": "claude-3-haiku-20240307",
+            "model": "claude-haiku-4-5-20251001",
         },
     },
     "autosave": {
@@ -76,9 +76,9 @@ class SemanticConfig:
     threshold: float = 0.7
     vertex_project_id: str = ""
     vertex_location: str = "us-central1"
-    vertex_model: str = "text-embedding-004"
+    vertex_model: str = "gemini-embedding-001"
     claude_api_key_env: str = "ANTHROPIC_API_KEY"
-    claude_model: str = "claude-3-haiku-20240307"
+    claude_model: str = "voyage-4-lite"
 
 
 @dataclass
@@ -138,9 +138,9 @@ class LLMConfig:
     Reuses the same provider as semantic search but with a different model.
     """
 
-    model: str = "gemini-2.0-flash"
-    vertex_model: str = "gemini-2.0-flash"
-    claude_model: str = "claude-3-haiku-20240307"
+    model: str = "gemini-3-flash"
+    vertex_model: str = "gemini-3-flash"
+    claude_model: str = "claude-haiku-4-5-20251001"
 
 
 @dataclass
@@ -229,9 +229,9 @@ def _build_config(base_path: Path, data: dict[str, Any]) -> Config:
         threshold=semantic_data.get("threshold", 0.7),
         vertex_project_id=semantic_data.get("vertex", {}).get("project_id", ""),
         vertex_location=semantic_data.get("vertex", {}).get("location", "us-central1"),
-        vertex_model=semantic_data.get("vertex", {}).get("model", "text-embedding-004"),
+        vertex_model=semantic_data.get("vertex", {}).get("model", "gemini-embedding-001"),
         claude_api_key_env=semantic_data.get("claude", {}).get("api_key_env", "ANTHROPIC_API_KEY"),
-        claude_model=semantic_data.get("claude", {}).get("model", "claude-3-haiku-20240307"),
+        claude_model=semantic_data.get("claude", {}).get("model", "voyage-4-lite"),
     )
 
     autosave_data = data.get("autosave", {})
@@ -265,9 +265,9 @@ def _build_config(base_path: Path, data: dict[str, Any]) -> Config:
 
     llm_data = data.get("llm", {})
     llm = LLMConfig(
-        model=llm_data.get("model", "gemini-2.0-flash"),
-        vertex_model=llm_data.get("vertex", {}).get("model", "gemini-2.0-flash"),
-        claude_model=llm_data.get("claude", {}).get("model", "claude-3-haiku-20240307"),
+        model=llm_data.get("model", "gemini-3-flash"),
+        vertex_model=llm_data.get("vertex", {}).get("model", "gemini-3-flash"),
+        claude_model=llm_data.get("claude", {}).get("model", "claude-haiku-4-5-20251001"),
     )
 
     hooks_data = data.get("hooks", {})

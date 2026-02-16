@@ -436,11 +436,11 @@ semantic:
   vertex:
     project_id: your-gcp-project
     location: us-central1
-    model: text-embedding-004
+    model: gemini-embedding-001
   
   claude:
     api_key_env: VOYAGE_API_KEY
-    model: voyage-3-lite
+    model: voyage-4-lite
 
 autosave:
   enabled: true
