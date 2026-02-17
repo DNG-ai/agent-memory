@@ -1957,7 +1957,23 @@ def startup(
             store, context.pinned_memories + context.group_memories
         )
 
+        # Check for updates (non-blocking, cached)
+        from agent_memory.update_check import check_for_updates
+
+        update_info = check_for_updates(config)
+
         if as_json:
+            hints = [
+                'Before ending, run: agent-memory session summarize "<summary>"',
+                'Search before starting: agent-memory search "<topic>"',
+                'Save learnings after tasks: agent-memory save "<what you learned>"',
+            ]
+            if update_info and update_info["behind"] > 0:
+                n = update_info["behind"]
+                hints.append(
+                    f"Update available: {n} new commit{'s' if n != 1 else ''}. "
+                    "Run: cd <repo> && git pull"
+                )
             data = {
                 "pinned_memories": [m.to_dict() for m in context.pinned_memories],
                 "group_memories": [m.to_dict() for m in context.group_memories],
@@ -1966,14 +1982,18 @@ def startup(
                 "previous_session_summaries": [
                     m.to_dict() for m in context.previous_session_summaries
                 ],
-                "hints": [
-                    'Before ending, run: agent-memory session summarize "<summary>"',
-                    'Search before starting: agent-memory search "<topic>"',
-                    'Save learnings after tasks: agent-memory save "<what you learned>"',
-                ],
+                "hints": hints,
+                "update_available": update_info,
             }
             console.print(json.dumps(data, indent=2))
         else:
+            if update_info and update_info["behind"] > 0:
+                n = update_info["behind"]
+                console.print(
+                    f"\n[yellow]Update available: {n} new commit{'s' if n != 1 else ''}. "
+                    "Run: cd <repo> && git pull[/yellow]"
+                )
+
             if context.pinned_memories:
                 console.print(f"\n[bold]Pinned Memories[/bold] ({len(context.pinned_memories)})")
                 for m in context.pinned_memories:
